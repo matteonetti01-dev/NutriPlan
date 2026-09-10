@@ -1,0 +1,7 @@
+{
+  "name": "NutriPlan",
+  "description": "App di nutrizione intuitiva per gestire piani multipli, pasti dettagliati con stima AI e modalità Giornata fuori.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

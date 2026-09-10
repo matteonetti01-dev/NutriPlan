@@ -1,0 +1,36 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer subtle rim ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#4E9F76"
+        android:strokeWidth="2.5"
+        android:pathData="M54,26 A28,28 0 1,0 54,82 A28,28 0 1,0 54,26 Z" />
+
+    <!-- Inner plate dish -->
+    <path
+        android:fillColor="#EAF5EE"
+        android:pathData="M54,32 A22,22 0 1,0 54,76 A22,22 0 1,0 54,32 Z" />
+
+    <!-- Fork on left inside plate -->
+    <path
+        android:fillColor="#1B3A2B"
+        android:pathData="M44,40 L44,47 C44,49.2 45.8,51 48,51 L48,67 C48,67.6 48.4,68 49,68 C49.6,68 50,67.6 50,67 L50,51 C52.2,51 54,49.2 54,47 L54,40 L52,40 L52,46 C52,46.6 51.6,47 51,47 L51,40 L49,40 L49,47 C48.4,47 48,46.6 48,46 L48,40 Z" />
+
+    <!-- Knife/Spoon on right inside plate -->
+    <path
+        android:fillColor="#1B3A2B"
+        android:pathData="M59,40 C57.3,40 56,41.8 56,44 C56,48.5 58,51 59,51 L59,67 C59,67.6 59.4,68 60,68 C60.6,68 61,67.6 61,67 L61,51 C62,51 64,48.5 64,44 C64,41.8 62.7,40 61,40 Z" />
+
+    <!-- Fresh sprouting leaf accent at top right of plate -->
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M66,30 C66,30 76,28 78,38 C76,43 71,44 67,41 C66.5,40.5 66.2,38 66,36 Z" />
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M66,36 C70,36 74,34 78,38 C74,38 70,39 67,41 Z" />
+</vector>
+
