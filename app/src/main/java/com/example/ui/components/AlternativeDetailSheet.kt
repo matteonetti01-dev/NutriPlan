@@ -66,6 +66,8 @@ import com.example.data.entity.Ingredient
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
+import com.example.ui.theme.ApexBorder
+import com.example.ui.theme.ApexDarkSurfaceHighlight
 import com.example.ui.theme.NutriCalories
 import com.example.ui.theme.NutriCarbs
 import com.example.ui.theme.NutriDark
@@ -587,8 +589,8 @@ fun AlternativeDetailSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFFF9FAFB))
-                        .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+                        .background(ApexDarkSurfaceHighlight)
+                        .border(1.dp, ApexBorder, RoundedCornerShape(12.dp))
                         .padding(16.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1018,10 +1020,10 @@ internal fun CopyAlternativeDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+                                .border(1.dp, ApexBorder, RoundedCornerShape(12.dp))
                                 .clickable { onSelectSlot(slot) }
                                 .testTag("copy_to_slot_${slot.id}"),
-                            color = Color(0xFFF9FAFB)
+                            color = ApexDarkSurfaceHighlight
                         ) {
                             Row(
                                 modifier = Modifier

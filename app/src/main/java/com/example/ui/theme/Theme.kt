@@ -1,33 +1,33 @@
 package com.example.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// Consistent clean light theme as requested in user specifications
-private val LightColorScheme = lightColorScheme(
-  primary = NutriDark,
-  onPrimary = Color.White,
-  secondary = NutriDarkSurface,
-  onSecondary = Color.White,
-  surface = NutriCardBg,
-  onSurface = NutriTextPrimary,
-  background = NutriBgLight,
-  onBackground = NutriTextPrimary,
-  outline = NutriCardBorder,
-  surfaceVariant = NutriCardInner,
-  onSurfaceVariant = NutriTextSecondary,
+// APEX // AI Cyber Stealth Dark Color Scheme
+private val DarkColorScheme = darkColorScheme(
+  primary = ApexNeonLime,
+  onPrimary = Color.Black,
+  secondary = ApexNeonLime,
+  onSecondary = Color.Black,
+  surface = ApexDarkSurface,
+  onSurface = ApexTextPrimary,
+  background = ApexBlack,
+  onBackground = ApexTextPrimary,
+  outline = ApexBorder,
+  surfaceVariant = ApexDarkSurfaceHighlight,
+  onSurfaceVariant = ApexTextSecondary,
 )
 
 @Composable
 fun MyApplicationTheme(
-  darkTheme: Boolean = false, // Always clean light theme
+  darkTheme: Boolean = true, // APEX // AI Stealth Dark theme
   dynamicColor: Boolean = false,
   content: @Composable () -> Unit,
 ) {
   MaterialTheme(
-    colorScheme = LightColorScheme,
+    colorScheme = DarkColorScheme,
     typography = Typography,
     content = content
   )
@@ -35,14 +35,15 @@ fun MyApplicationTheme(
 
 @Composable
 fun nutriTextFieldColors() = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-  focusedTextColor = NutriTextPrimary,
-  unfocusedTextColor = NutriTextPrimary,
-  focusedContainerColor = Color.White,
-  unfocusedContainerColor = Color.White,
-  focusedBorderColor = NutriDark,
-  unfocusedBorderColor = Color(0xFFE5E7EB),
-  cursorColor = NutriDark
+  focusedTextColor = ApexTextPrimary,
+  unfocusedTextColor = ApexTextPrimary,
+  focusedContainerColor = ApexDarkSurfaceHighlight,
+  unfocusedContainerColor = ApexDarkSurfaceHighlight,
+  focusedBorderColor = ApexNeonLime,
+  unfocusedBorderColor = ApexBorder,
+  cursorColor = ApexNeonLime
 )
+
 
 
 

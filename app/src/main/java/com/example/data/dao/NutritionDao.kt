@@ -11,6 +11,7 @@ import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
+import com.example.data.entity.ShoppingItemEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -103,4 +104,32 @@ interface NutritionDao {
 
     @Query("DELETE FROM logged_meals WHERE id = :id")
     suspend fun deleteLoggedMealById(id: Long)
+
+    // --- Shopping List (Spesa) ---
+    @Query("SELECT * FROM shopping_items WHERE planId = :planId ORDER BY isChecked ASC, category ASC, id ASC")
+    fun getShoppingItemsForPlan(planId: Long): Flow<List<ShoppingItemEntity>>
+
+    @Query("SELECT * FROM shopping_items WHERE planId = :planId")
+    suspend fun getShoppingItemsForPlanSync(planId: Long): List<ShoppingItemEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertShoppingItem(item: ShoppingItemEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertShoppingItems(items: List<ShoppingItemEntity>)
+
+    @Update
+    suspend fun updateShoppingItem(item: ShoppingItemEntity)
+
+    @Delete
+    suspend fun deleteShoppingItem(item: ShoppingItemEntity)
+
+    @Query("DELETE FROM shopping_items WHERE planId = :planId")
+    suspend fun clearShoppingItemsForPlan(planId: Long)
+
+    @Query("UPDATE shopping_items SET isChecked = :checked WHERE planId = :planId")
+    suspend fun setAllShoppingItemsChecked(planId: Long, checked: Boolean)
+
+    @Query("DELETE FROM shopping_items WHERE planId = :planId AND isChecked = 1")
+    suspend fun deleteCheckedShoppingItems(planId: Long)
 }

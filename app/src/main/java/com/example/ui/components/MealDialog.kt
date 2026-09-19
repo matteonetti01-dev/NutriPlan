@@ -1,9 +1,12 @@
 package com.example.ui.components
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +31,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Button
@@ -56,8 +60,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
+import androidx.core.content.ContextCompat
+import com.example.util.CameraUtils
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -68,6 +75,20 @@ import coil.compose.AsyncImage
 import com.example.ai.DishEstimateResult
 import com.example.ai.GeminiNutritionService
 import com.example.data.entity.Ingredient
+import com.example.ui.theme.ApexBlack
+import com.example.ui.theme.ApexBorder
+import com.example.ui.theme.ApexCalories
+import com.example.ui.theme.ApexCarbs
+import com.example.ui.theme.ApexCyanAccent
+import com.example.ui.theme.ApexDarkSurface
+import com.example.ui.theme.ApexDarkSurfaceHighlight
+import com.example.ui.theme.ApexFats
+import com.example.ui.theme.ApexGreen
+import com.example.ui.theme.ApexNeonLime
+import com.example.ui.theme.ApexProtein
+import com.example.ui.theme.ApexTextMuted
+import com.example.ui.theme.ApexTextPrimary
+import com.example.ui.theme.ApexTextSecondary
 import com.example.ui.theme.NutriCalories
 import com.example.ui.theme.NutriCarbs
 import com.example.ui.theme.NutriDark
@@ -98,7 +119,8 @@ fun MealDialog(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
                 .clip(RoundedCornerShape(24.dp)),
-            color = Color.White,
+            color = ApexDarkSurface,
+            border = BorderStroke(1.dp, ApexBorder),
             tonalElevation = 6.dp
         ) {
             Column(
@@ -116,7 +138,7 @@ fun MealDialog(
                         text = title,
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     IconButton(
                         onClick = onDismiss,
@@ -125,7 +147,7 @@ fun MealDialog(
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Chiudi",
-                            tint = NutriTextSecondary
+                            tint = ApexTextSecondary
                         )
                     }
                 }
@@ -138,7 +160,8 @@ fun MealDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFFF3F4F6))
+                        .background(ApexDarkSurfaceHighlight)
+                        .border(1.dp, ApexBorder, RoundedCornerShape(12.dp))
                         .padding(4.dp)
                 ) {
                     Row(modifier = Modifier.fillMaxWidth()) {
@@ -148,7 +171,7 @@ fun MealDialog(
                                 modifier = Modifier
                                     .weight(1f)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) Color.White else Color.Transparent)
+                                    .background(if (isSelected) ApexNeonLime else Color.Transparent)
                                     .clickable { selectedTab = index }
                                     .padding(vertical = 8.dp),
                                 contentAlignment = Alignment.Center
@@ -156,8 +179,8 @@ fun MealDialog(
                                 Text(
                                     text = name,
                                     fontSize = 13.sp,
-                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (isSelected) NutriTextPrimary else NutriTextSecondary
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isSelected) ApexBlack else ApexTextSecondary
                                 )
                             }
                         }
@@ -193,12 +216,15 @@ private fun TabIngredients(
     geminiService: GeminiNutritionService,
     onConclude: (name: String, calories: Int, protein: Int, carbs: Int, fat: Int, ingredients: List<Ingredient>, notes: String, photoUri: String?) -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var foodName by remember { mutableStateOf("") }
     var quantity by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
 
     val ingredientsList = remember { mutableStateListOf<Ingredient>() }
+
+    var tempCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -214,18 +240,73 @@ private fun TabIngredients(
         }
     }
 
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && tempCameraUri != null) {
+            scope.launch {
+                isLoading = true
+                val result = geminiService.scanNutritionalLabel(tempCameraUri)
+                foodName = result.foodName
+                quantity = result.portion
+                isLoading = false
+            }
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempCameraUri = uri
+                takePictureLauncher.launch(uri)
+            } catch (e: Exception) {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
+        } else {
+            photoPickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+        }
+    }
+
+    fun launchCameraForLabel() {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPermission) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempCameraUri = uri
+                takePictureLauncher.launch(uri)
+            } catch (e: Exception) {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         OutlinedTextField(
             value = foodName,
             onValueChange = { foodName = it },
-            placeholder = { Text("Nome alimento (es. pasta)", color = NutriTextMuted, fontSize = 14.sp) },
+            placeholder = { Text("Nome alimento (es. pasta)", color = ApexTextMuted, fontSize = 14.sp) },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("ingredient_name_input"),
             singleLine = true,
             shape = RoundedCornerShape(12.dp),
             colors = nutriTextFieldColors(),
-            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
         )
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -233,44 +314,63 @@ private fun TabIngredients(
         OutlinedTextField(
             value = quantity,
             onValueChange = { quantity = it },
-            placeholder = { Text("Quantità (es. 80g)", color = NutriTextMuted, fontSize = 14.sp) },
+            placeholder = { Text("Quantità (es. 80g)", color = ApexTextMuted, fontSize = 14.sp) },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("ingredient_quantity_input"),
             singleLine = true,
             shape = RoundedCornerShape(12.dp),
             colors = nutriTextFieldColors(),
-            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
         )
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Two buttons: Etichetta & Aggiungi
+        // Buttons: Fotocamera Etichetta, Archivio & Aggiungi
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedButton(
+                onClick = { launchCameraForLabel() },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp)
+                    .testTag("label_photo_button"),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, ApexBorder),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = ApexTextPrimary
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PhotoCamera,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = ApexNeonLime
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Scatta etichetta", color = ApexTextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
+            }
+
+            IconButton(
                 onClick = {
                     photoPickerLauncher.launch(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                     )
                 },
                 modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp)
-                    .testTag("label_photo_button"),
-                shape = RoundedCornerShape(10.dp),
-                border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFFE5E7EB)))
+                    .size(44.dp)
+                    .border(1.dp, ApexBorder, RoundedCornerShape(10.dp))
+                    .testTag("label_gallery_button")
             ) {
                 Icon(
-                    imageVector = Icons.Default.PhotoCamera,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = NutriTextPrimary
+                    imageVector = Icons.Default.Image,
+                    contentDescription = "Scegli da galleria",
+                    tint = ApexTextSecondary,
+                    modifier = Modifier.size(18.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Etichetta", color = NutriTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
 
             Button(
@@ -295,13 +395,13 @@ private fun TabIngredients(
                     .testTag("add_ingredient_button"),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF71717A),
-                    contentColor = Color.White
+                    containerColor = ApexNeonLime,
+                    contentColor = ApexBlack
                 ),
                 enabled = !isLoading && foodName.isNotBlank()
             ) {
                 if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = ApexBlack, strokeWidth = 2.dp)
                 } else {
                     Icon(
                         imageVector = Icons.Default.Add,
@@ -309,7 +409,7 @@ private fun TabIngredients(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Aggiungi", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text("Aggiungi", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -319,7 +419,7 @@ private fun TabIngredients(
         Text(
             text = "Scrivi nome e quantità e premi Aggiungi per la stima AI, oppure fotografa l'etichetta nutrizionale.",
             fontSize = 11.5.sp,
-            color = NutriTextMuted,
+            color = ApexTextMuted,
             lineHeight = 16.sp
         )
 
@@ -330,8 +430,8 @@ private fun TabIngredients(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFFF9FAFB))
-                    .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+                    .background(ApexDarkSurfaceHighlight)
+                    .border(1.dp, ApexBorder, RoundedCornerShape(12.dp))
                     .padding(12.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -339,7 +439,7 @@ private fun TabIngredients(
                         text = "Ingredienti aggiunti (${ingredientsList.size}):",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     Spacer(modifier = Modifier.height(6.dp))
 
@@ -347,7 +447,7 @@ private fun TabIngredients(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 3.dp),
+                                .padding(vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -356,13 +456,37 @@ private fun TabIngredients(
                                     text = "• ${ing.name} ${ing.quantity}",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium,
-                                    color = NutriTextPrimary
+                                    color = ApexTextPrimary
                                 )
-                                Text(
-                                    text = "${ing.calories} kcal • P ${ing.protein}g • C ${ing.carbs}g • G ${ing.fat}g",
-                                    fontSize = 11.sp,
-                                    color = NutriTextSecondary
-                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "${ing.calories} kcal",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ApexCalories
+                                    )
+                                    Text(text = "•", fontSize = 9.sp, color = ApexBorder)
+                                    Text(
+                                        text = "P ${ing.protein}g",
+                                        fontSize = 11.sp,
+                                        color = ApexProtein
+                                    )
+                                    Text(text = "•", fontSize = 9.sp, color = ApexBorder)
+                                    Text(
+                                        text = "C ${ing.carbs}g",
+                                        fontSize = 11.sp,
+                                        color = ApexCarbs
+                                    )
+                                    Text(text = "•", fontSize = 9.sp, color = ApexBorder)
+                                    Text(
+                                        text = "G ${ing.fat}g",
+                                        fontSize = 11.sp,
+                                        color = ApexFats
+                                    )
+                                }
                             }
                             IconButton(
                                 onClick = { ingredientsList.removeAt(index) },
@@ -371,7 +495,7 @@ private fun TabIngredients(
                                 Icon(
                                     imageVector = Icons.Default.DeleteOutline,
                                     contentDescription = "Rimuovi",
-                                    tint = NutriTextMuted,
+                                    tint = ApexTextMuted,
                                     modifier = Modifier.size(16.dp)
                                 )
                             }
@@ -384,12 +508,39 @@ private fun TabIngredients(
                     val totCarbs = ingredientsList.sumOf { it.carbs }
                     val totFat = ingredientsList.sumOf { it.fat }
 
-                    Text(
-                        text = "Totale: $totCal kcal • P ${totProt}g • C ${totCarbs}g • G ${totFat}g",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = NutriCalories
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Totale: $totCal kcal",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ApexCalories
+                        )
+                        Text(text = "•", fontSize = 10.sp, color = ApexBorder)
+                        Text(
+                            text = "P: ${totProt}g",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexProtein
+                        )
+                        Text(text = "•", fontSize = 10.sp, color = ApexBorder)
+                        Text(
+                            text = "C: ${totCarbs}g",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexCarbs
+                        )
+                        Text(text = "•", fontSize = 10.sp, color = ApexBorder)
+                        Text(
+                            text = "G: ${totFat}g",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexFats
+                        )
+                    }
                 }
             }
         }
@@ -414,8 +565,8 @@ private fun TabIngredients(
                 .testTag("conclude_meal_button"),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF71717A),
-                contentColor = Color.White
+                containerColor = ApexNeonLime,
+                contentColor = ApexBlack
             ),
             enabled = ingredientsList.isNotEmpty()
         ) {
@@ -425,7 +576,7 @@ private fun TabIngredients(
                 modifier = Modifier.size(18.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Concludi pasto", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Concludi pasto", fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -438,6 +589,7 @@ private fun TabPhotoDish(
     geminiService: GeminiNutritionService,
     onConclude: (name: String, calories: Int, protein: Int, carbs: Int, fat: Int, ingredients: List<Ingredient>, notes: String, photoUri: String?) -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var notes by remember { mutableStateOf("") }
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
@@ -447,11 +599,62 @@ private fun TabPhotoDish(
     var followUpAnswer by remember { mutableStateOf("") }
     val conversationHistory = remember { mutableStateListOf<Pair<String, String>>() }
 
+    var tempCameraUri by remember { mutableStateOf<Uri?>(null) }
+
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
             selectedImageUri = uri
+        }
+    }
+
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && tempCameraUri != null) {
+            selectedImageUri = tempCameraUri
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempCameraUri = uri
+                takePictureLauncher.launch(uri)
+            } catch (e: Exception) {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
+        } else {
+            photoPickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+        }
+    }
+
+    fun launchCameraForDish() {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPermission) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempCameraUri = uri
+                takePictureLauncher.launch(uri)
+            } catch (e: Exception) {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -463,7 +666,8 @@ private fun TabPhotoDish(
                     .fillMaxWidth()
                     .height(130.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFFF3F4F6)),
+                    .background(ApexDarkSurfaceHighlight)
+                    .border(1.dp, ApexBorder, RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 AsyncImage(
@@ -478,7 +682,7 @@ private fun TabPhotoDish(
                         .align(Alignment.TopEnd)
                         .padding(6.dp)
                         .size(28.dp)
-                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                        .background(ApexBlack.copy(alpha = 0.7f), CircleShape)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
@@ -494,46 +698,65 @@ private fun TabPhotoDish(
         OutlinedTextField(
             value = notes,
             onValueChange = { notes = it },
-            placeholder = { Text("Note (es. porzione abbondante, fuori casa...)", color = NutriTextMuted, fontSize = 14.sp) },
+            placeholder = { Text("Note (es. porzione abbondante, fuori casa...)", color = ApexTextMuted, fontSize = 14.sp) },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("dish_notes_input"),
             shape = RoundedCornerShape(12.dp),
             colors = nutriTextFieldColors(),
-            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
         )
 
         Spacer(modifier = Modifier.height(12.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedButton(
+                onClick = { launchCameraForDish() },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp)
+                    .testTag("dish_photo_button"),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, ApexBorder),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = ApexTextPrimary
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PhotoCamera,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = ApexNeonLime
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (selectedImageUri != null) "Rifai foto" else "Scatta foto",
+                    color = ApexTextPrimary,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            IconButton(
                 onClick = {
                     photoPickerLauncher.launch(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                     )
                 },
                 modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp)
-                    .testTag("dish_photo_button"),
-                shape = RoundedCornerShape(10.dp),
-                border = ButtonDefaults.outlinedButtonBorder.copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFFE5E7EB)))
+                    .size(44.dp)
+                    .border(1.dp, ApexBorder, RoundedCornerShape(10.dp))
+                    .testTag("dish_gallery_button")
             ) {
                 Icon(
-                    imageVector = Icons.Default.PhotoCamera,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = NutriTextPrimary
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (selectedImageUri != null) "Cambia" else "Foto",
-                    color = NutriTextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
+                    imageVector = Icons.Default.Image,
+                    contentDescription = "Scegli da galleria",
+                    tint = ApexTextSecondary,
+                    modifier = Modifier.size(18.dp)
                 )
             }
 
@@ -556,13 +779,13 @@ private fun TabPhotoDish(
                     .testTag("dish_estimate_button"),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF71717A),
-                    contentColor = Color.White
+                    containerColor = ApexNeonLime,
+                    contentColor = ApexBlack
                 ),
                 enabled = !isLoading && (notes.isNotBlank() || selectedImageUri != null)
             ) {
                 if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = ApexBlack, strokeWidth = 2.dp)
                 } else {
                     Icon(
                         imageVector = Icons.Default.Send,
@@ -570,7 +793,7 @@ private fun TabPhotoDish(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Stima", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text("Stima", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -580,35 +803,83 @@ private fun TabPhotoDish(
         Text(
             text = "Foto del piatto intero: l'AI può farti domande di follow-up per affinare la stima.",
             fontSize = 11.5.sp,
-            color = NutriTextMuted,
+            color = ApexTextMuted,
             lineHeight = 16.sp
         )
 
-        // Estimated result display
+        // Estimated result display (AI SCAN & ESTIMATION BANNER)
         estimateResult?.let { result ->
             Spacer(modifier = Modifier.height(14.dp))
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFFF9FAFB))
-                    .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+                    .background(ApexDarkSurfaceHighlight)
+                    .border(1.dp, ApexNeonLime.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
                     .padding(14.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = result.mealName,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "${result.calories} kcal • P ${result.protein}g • C ${result.carbs}g • G ${result.fat}g",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = NutriCalories
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = result.mealName,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ApexTextPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(ApexNeonLime.copy(alpha = 0.15f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "Stima AI",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ApexNeonLime
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${result.calories} kcal",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ApexCalories
+                        )
+                        Text(text = "•", fontSize = 10.sp, color = ApexBorder)
+                        Text(
+                            text = "P: ${result.protein}g",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexProtein
+                        )
+                        Text(text = "•", fontSize = 10.sp, color = ApexBorder)
+                        Text(
+                            text = "C: ${result.carbs}g",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexCarbs
+                        )
+                        Text(text = "•", fontSize = 10.sp, color = ApexBorder)
+                        Text(
+                            text = "G: ${result.fat}g",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexFats
+                        )
+                    }
 
                     // Follow-up question if present
                     if (!result.followUpQuestion.isNullOrBlank()) {
@@ -617,8 +888,8 @@ private fun TabPhotoDish(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFFEFF6FF))
-                                .border(1.dp, Color(0xFFBFDBFE), RoundedCornerShape(8.dp))
+                                .background(ApexDarkSurface)
+                                .border(1.dp, ApexCyanAccent.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
                                 .padding(10.dp)
                         ) {
                             Column {
@@ -626,12 +897,14 @@ private fun TabPhotoDish(
                                     text = "💡 Follow-up AI:",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF1D4ED8)
+                                    color = ApexCyanAccent
                                 )
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = result.followUpQuestion,
                                     fontSize = 12.sp,
-                                    color = Color(0xFF1E40AF)
+                                    color = ApexTextPrimary,
+                                    lineHeight = 16.sp
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Row(
@@ -641,12 +914,12 @@ private fun TabPhotoDish(
                                     OutlinedTextField(
                                         value = followUpAnswer,
                                         onValueChange = { followUpAnswer = it },
-                                        placeholder = { Text("Rispondi qui...", fontSize = 12.sp, color = NutriTextMuted) },
+                                        placeholder = { Text("Rispondi qui...", fontSize = 12.sp, color = ApexTextMuted) },
                                         modifier = Modifier.weight(1f),
                                         singleLine = true,
                                         shape = RoundedCornerShape(8.dp),
                                         colors = nutriTextFieldColors(),
-                                        textStyle = TextStyle(color = NutriTextPrimary, fontSize = 12.sp)
+                                        textStyle = TextStyle(color = ApexTextPrimary, fontSize = 12.sp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Button(
@@ -668,9 +941,12 @@ private fun TabPhotoDish(
                                         },
                                         modifier = Modifier.height(40.dp),
                                         shape = RoundedCornerShape(8.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = ApexNeonLime,
+                                            contentColor = ApexBlack
+                                        )
                                     ) {
-                                        Text("Affina", fontSize = 12.sp)
+                                        Text("Affina", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
@@ -701,8 +977,8 @@ private fun TabPhotoDish(
                     .testTag("conclude_photo_meal_button"),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = NutriDark,
-                    contentColor = Color.White
+                    containerColor = ApexNeonLime,
+                    contentColor = ApexBlack
                 )
             ) {
                 Icon(
@@ -711,7 +987,7 @@ private fun TabPhotoDish(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Concludi pasto", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("Concludi pasto", fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -731,19 +1007,19 @@ private fun TabManual(
     var fat by remember { mutableStateOf("") }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text("Nome", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = NutriTextPrimary)
+        Text("Nome", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = ApexTextSecondary)
         Spacer(modifier = Modifier.height(4.dp))
         OutlinedTextField(
             value = name,
             onValueChange = { name = it },
-            placeholder = { Text("es. Pranzo fatto in casa", color = NutriTextMuted, fontSize = 14.sp) },
+            placeholder = { Text("es. Pranzo fatto in casa", color = ApexTextMuted, fontSize = 14.sp) },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("manual_name_input"),
             singleLine = true,
             shape = RoundedCornerShape(10.dp),
             colors = nutriTextFieldColors(),
-            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
         )
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -753,12 +1029,12 @@ private fun TabManual(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Kcal", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = NutriTextPrimary)
+                Text("Kcal", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = ApexTextSecondary)
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = kcal,
                     onValueChange = { kcal = it },
-                    placeholder = { Text("0", color = NutriTextMuted) },
+                    placeholder = { Text("0", color = ApexTextMuted) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("manual_kcal_input"),
@@ -766,17 +1042,17 @@ private fun TabManual(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = RoundedCornerShape(10.dp),
                     colors = nutriTextFieldColors(),
-                    textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+                    textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
                 )
             }
 
             Column(modifier = Modifier.weight(1f)) {
-                Text("Proteine (g)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = NutriTextPrimary)
+                Text("Proteine (g)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = ApexTextSecondary)
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = protein,
                     onValueChange = { protein = it },
-                    placeholder = { Text("0", color = NutriTextMuted) },
+                    placeholder = { Text("0", color = ApexTextMuted) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("manual_protein_input"),
@@ -784,7 +1060,7 @@ private fun TabManual(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = RoundedCornerShape(10.dp),
                     colors = nutriTextFieldColors(),
-                    textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+                    textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
                 )
             }
         }
@@ -796,12 +1072,12 @@ private fun TabManual(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Carbo (g)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = NutriTextPrimary)
+                Text("Carbo (g)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = ApexTextSecondary)
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = carbs,
                     onValueChange = { carbs = it },
-                    placeholder = { Text("0", color = NutriTextMuted) },
+                    placeholder = { Text("0", color = ApexTextMuted) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("manual_carbs_input"),
@@ -809,17 +1085,17 @@ private fun TabManual(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = RoundedCornerShape(10.dp),
                     colors = nutriTextFieldColors(),
-                    textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+                    textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
                 )
             }
 
             Column(modifier = Modifier.weight(1f)) {
-                Text("Grassi (g)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = NutriTextPrimary)
+                Text("Grassi (g)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = ApexTextSecondary)
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = fat,
                     onValueChange = { fat = it },
-                    placeholder = { Text("0", color = NutriTextMuted) },
+                    placeholder = { Text("0", color = ApexTextMuted) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("manual_fat_input"),
@@ -827,7 +1103,7 @@ private fun TabManual(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     shape = RoundedCornerShape(10.dp),
                     colors = nutriTextFieldColors(),
-                    textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp)
+                    textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp)
                 )
             }
         }
@@ -850,8 +1126,8 @@ private fun TabManual(
                 .testTag("conclude_manual_meal_button"),
             shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = NutriDark,
-                contentColor = Color.White
+                containerColor = ApexNeonLime,
+                contentColor = ApexBlack
             ),
             enabled = isFormValid
         ) {
@@ -861,7 +1137,7 @@ private fun TabManual(
                 modifier = Modifier.size(18.dp)
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Concludi pasto", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Concludi pasto", fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

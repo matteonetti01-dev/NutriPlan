@@ -2,6 +2,7 @@ package com.example.ui.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.DishEstimateResult
@@ -13,12 +14,15 @@ import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
+import com.example.data.entity.ShoppingItemEntity
 import com.example.data.repository.NutritionRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -100,6 +104,37 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
     val todayFat: StateFlow<Int> = todayLoggedMeals.map { list ->
         list.sumOf { it.fat }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    // --- Shopping List (Spesa) State ---
+    private val _selectedShoppingPlanId = MutableStateFlow<Long?>(null)
+    val selectedShoppingPlanId: StateFlow<Long?> = _selectedShoppingPlanId.asStateFlow()
+
+    fun selectShoppingPlan(planId: Long) {
+        _selectedShoppingPlanId.value = planId
+    }
+
+    val currentShoppingPlan: StateFlow<PlanEntity?> = combine(
+        allPlans,
+        activePlan,
+        _selectedShoppingPlanId
+    ) { plans, active, selectedId ->
+        if (selectedId != null) {
+            plans.find { it.id == selectedId } ?: active ?: plans.firstOrNull()
+        } else {
+            active ?: plans.firstOrNull()
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val shoppingItems: StateFlow<List<ShoppingItemEntity>> = currentShoppingPlan.flatMapLatest { plan ->
+        if (plan != null) {
+            repository.getShoppingItemsForPlan(plan.id)
+        } else {
+            flowOf(emptyList())
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _isGeneratingShoppingList = MutableStateFlow(false)
+    val isGeneratingShoppingList: StateFlow<Boolean> = _isGeneratingShoppingList.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -333,6 +368,165 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
     fun deleteLoggedMeal(meal: LoggedMealEntity) {
         viewModelScope.launch {
             repository.deleteLoggedMeal(meal)
+        }
+    }
+
+    fun clearTodayMeals() {
+        viewModelScope.launch {
+            val list = todayLoggedMeals.value
+            list.forEach { repository.deleteLoggedMeal(it) }
+        }
+    }
+
+    // --- Shopping List (Spesa) Actions ---
+
+    fun toggleShoppingItem(item: ShoppingItemEntity) {
+        viewModelScope.launch {
+            repository.updateShoppingItem(item.copy(isChecked = !item.isChecked))
+        }
+    }
+
+    fun updateShoppingItemQuantity(item: ShoppingItemEntity, newQuantity: String) {
+        viewModelScope.launch {
+            repository.updateShoppingItem(item.copy(quantity = newQuantity.trim()))
+        }
+    }
+
+    fun updateShoppingItemPackageCount(item: ShoppingItemEntity, newCount: Int) {
+        viewModelScope.launch {
+            repository.updateShoppingItem(item.copy(packageCount = newCount.coerceAtLeast(1)))
+        }
+    }
+
+    fun updateShoppingItemDetails(
+        item: ShoppingItemEntity,
+        newName: String,
+        newQuantity: String,
+        newPackageCount: Int,
+        newPackageGrammage: String,
+        newNotes: String
+    ) {
+        viewModelScope.launch {
+            repository.updateShoppingItem(
+                item.copy(
+                    name = newName.trim(),
+                    quantity = newQuantity.trim(),
+                    packageCount = newPackageCount.coerceAtLeast(1),
+                    packageGrammage = newPackageGrammage.trim(),
+                    notes = newNotes.trim()
+                )
+            )
+        }
+    }
+
+    fun addCustomShoppingItem(
+        planId: Long,
+        name: String,
+        quantity: String,
+        packageCount: Int = 1,
+        packageGrammage: String = "",
+        category: String
+    ) {
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            repository.insertShoppingItem(
+                ShoppingItemEntity(
+                    planId = planId,
+                    name = name.trim(),
+                    quantity = quantity.trim(),
+                    packageCount = packageCount.coerceAtLeast(1),
+                    packageGrammage = packageGrammage.trim(),
+                    category = category.ifBlank { "Altro" },
+                    isChecked = false,
+                    isCustom = true
+                )
+            )
+        }
+    }
+
+    fun deleteShoppingItem(item: ShoppingItemEntity) {
+        viewModelScope.launch {
+            repository.deleteShoppingItem(item)
+        }
+    }
+
+    fun clearCheckedShoppingItems(planId: Long) {
+        viewModelScope.launch {
+            repository.deleteCheckedShoppingItems(planId)
+        }
+    }
+
+    fun setAllShoppingItemsChecked(planId: Long, checked: Boolean) {
+        viewModelScope.launch {
+            repository.setAllShoppingItemsChecked(planId, checked)
+        }
+    }
+
+    fun generateOrRefreshShoppingList(
+        planId: Long? = null,
+        onComplete: ((String) -> Unit)? = null
+    ) {
+        val targetPlanId = planId ?: currentShoppingPlan.value?.id ?: return
+        viewModelScope.launch {
+            _isGeneratingShoppingList.value = true
+            try {
+                val targetPlan = allPlans.value.find { it.id == targetPlanId }
+                    ?: activePlan.value
+                val planName = targetPlan?.name ?: "Piano"
+
+                val alternatives = repository.getAlternativesForPlan(targetPlanId).firstOrNull() ?: emptyList()
+                val foodStrings = mutableListOf<String>()
+
+                for (alt in alternatives) {
+                    if (alt.ingredients.isNotEmpty()) {
+                        for (ing in alt.ingredients) {
+                            val str = "${ing.name} ${ing.quantity}".trim()
+                            if (str.isNotBlank()) foodStrings.add(str)
+                        }
+                    } else if (alt.name.isNotBlank()) {
+                        foodStrings.add(alt.name.trim())
+                    }
+                }
+
+                if (foodStrings.isEmpty()) {
+                    onComplete?.invoke("Nessun alimento o pasto trovato nel piano '$planName'. Aggiungi prima dei pasti nel Piano!")
+                    return@launch
+                }
+
+                // Call AI to categorize and consolidate
+                val aiResults = geminiService.generateShoppingListFromPlan(planName, foodStrings)
+
+                // Preserve checked status of previously checked items and user custom items
+                val existing = repository.getShoppingItemsForPlanSync(targetPlanId)
+                val checkedNames = existing.filter { it.isChecked }.map { it.name.lowercase().trim() }.toSet()
+                val customItems = existing.filter { it.isCustom }
+
+                // Clear current items for this plan and insert fresh organized list
+                repository.clearShoppingItemsForPlan(targetPlanId)
+
+                val entities = aiResults.map { item ->
+                    val wasChecked = checkedNames.contains(item.name.lowercase().trim())
+                    ShoppingItemEntity(
+                        planId = targetPlanId,
+                        name = item.name,
+                        quantity = item.quantity,
+                        packageCount = item.packageCount.coerceAtLeast(1),
+                        packageGrammage = item.packageGrammage,
+                        category = item.category,
+                        isChecked = wasChecked,
+                        isCustom = false,
+                        notes = item.notes
+                    )
+                }
+
+                repository.insertShoppingItems(entities + customItems)
+                onComplete?.invoke("Lista della spesa generata con successo dall'AI! (${entities.size} alimenti) ✓")
+            } catch (e: Exception) {
+                Log.e("NutritionViewModel", "Error in generateOrRefreshShoppingList: ${e.message}", e)
+                onComplete?.invoke("Errore durante la generazione della spesa: ${e.message}")
+            } finally {
+                _isGeneratingShoppingList.value = false
+            }
         }
     }
 }

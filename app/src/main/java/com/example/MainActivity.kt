@@ -88,9 +88,9 @@ fun MainAppScreen(viewModel: NutritionViewModel) {
             NavigationBar(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(width = 0.8.dp, color = NutriCardBorder),
-                containerColor = Color.White,
-                tonalElevation = 2.dp
+                    .border(width = 0.8.dp, color = com.example.ui.theme.ApexBorder),
+                containerColor = com.example.ui.theme.ApexBlack,
+                tonalElevation = 0.dp
             ) {
                 navItems.forEachIndexed { index, item ->
                     val isSelected = currentTab == index
@@ -107,16 +107,16 @@ fun MainAppScreen(viewModel: NutritionViewModel) {
                         label = {
                             Text(
                                 text = item.title,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                fontSize = 10.5.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                             )
                         },
                         colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = NutriDark,
-                            selectedTextColor = NutriDark,
-                            unselectedIconColor = NutriTextMuted,
-                            unselectedTextColor = NutriTextSecondary,
-                            indicatorColor = Color(0xFFF3F4F6)
+                            selectedIconColor = com.example.ui.theme.ApexNeonLime,
+                            selectedTextColor = com.example.ui.theme.ApexNeonLime,
+                            unselectedIconColor = com.example.ui.theme.ApexTextMuted,
+                            unselectedTextColor = com.example.ui.theme.ApexTextMuted,
+                            indicatorColor = com.example.ui.theme.ApexDarkSurfaceHighlight
                         ),
                         modifier = Modifier.testTag(item.testTag)
                     )

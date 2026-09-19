@@ -61,6 +61,8 @@ import com.example.ai.GeminiNutritionService
 import com.example.data.entity.Ingredient
 import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealSlotEntity
+import com.example.ui.theme.ApexBorder
+import com.example.ui.theme.ApexDarkSurfaceHighlight
 import com.example.ui.theme.NutriCalories
 import com.example.ui.theme.NutriCarbs
 import com.example.ui.theme.NutriDark
@@ -571,8 +573,8 @@ fun LoggedMealDetailSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFFF9FAFB))
-                        .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+                        .background(ApexDarkSurfaceHighlight)
+                        .border(1.dp, ApexBorder, RoundedCornerShape(12.dp))
                         .padding(16.dp),
                     contentAlignment = Alignment.Center
                 ) {

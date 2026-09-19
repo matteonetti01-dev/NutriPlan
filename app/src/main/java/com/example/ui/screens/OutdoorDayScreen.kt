@@ -53,8 +53,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.entity.Ingredient
 import com.example.data.entity.LoggedMealEntity
+import com.example.ui.components.EmptyPlanCard
 import com.example.ui.components.LoggedMealDetailSheet
 import com.example.ui.components.MealDialog
+import com.example.ui.components.NewPlanDialog
 import com.example.ui.theme.NutriBgLight
 import com.example.ui.theme.NutriCalories
 import com.example.ui.theme.NutriCarbs
@@ -88,6 +90,7 @@ fun OutdoorDayScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     var showAddMealDialog by remember { mutableStateOf(false) }
+    var showNewPlanDialog by remember { mutableStateOf(false) }
     var selectedMealForDetail by remember { mutableStateOf<LoggedMealEntity?>(null) }
 
     val targetCalories = activePlan?.caloriesTarget ?: 2500
@@ -113,6 +116,11 @@ fun OutdoorDayScreen(
                 .testTag("outdoor_day_screen")
         ) {
             item {
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // APEX // AI Global Top Header
+                com.example.ui.components.ApexHeader()
+
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Header with Airplane Icon & Title
@@ -121,31 +129,32 @@ fun OutdoorDayScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(38.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFFEFF6FF)),
+                            .background(Color(0xFF1B2338)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Flight,
                             contentDescription = null,
-                            tint = Color(0xFF2563EB),
+                            tint = Color(0xFF60A5FA),
                             modifier = Modifier.size(20.dp)
                         )
                     }
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
                     Text(
                         text = "Giornata fuori",
-                        fontSize = 26.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black,
+                        color = NutriTextPrimary,
+                        letterSpacing = (-0.5).sp
                     )
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "Conta calorie con stima AI per ogni pasto, anche in vacanza.",
-                    fontSize = 13.sp,
+                    fontSize = 13.5.sp,
                     color = NutriTextSecondary,
                     lineHeight = 18.sp
                 )
@@ -153,23 +162,29 @@ fun OutdoorDayScreen(
                 Text(
                     text = formattedDate,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = NutriTextMuted
+                    fontWeight = FontWeight.SemiBold,
+                    color = com.example.ui.theme.ApexCyanAccent
                 )
 
                 Spacer(modifier = Modifier.height(18.dp))
 
-                // Daily Progress Card
-                DailyMacrosProgressCard(
-                    currentCalories = todayCalories,
-                    targetCalories = targetCalories,
-                    currentProtein = todayProtein,
-                    targetProtein = targetProtein,
-                    currentCarbs = todayCarbs,
-                    targetCarbs = targetCarbs,
-                    currentFat = todayFat,
-                    targetFat = targetFat
-                )
+                // Daily Progress Card or Empty Plan State if no active plan
+                if (activePlan != null) {
+                    DailyMacrosProgressCard(
+                        currentCalories = todayCalories,
+                        targetCalories = targetCalories,
+                        currentProtein = todayProtein,
+                        targetProtein = targetProtein,
+                        currentCarbs = todayCarbs,
+                        targetCarbs = targetCarbs,
+                        currentFat = todayFat,
+                        targetFat = targetFat
+                    )
+                } else {
+                    EmptyPlanCard(
+                        onCreatePlanClick = { showNewPlanDialog = true }
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(24.dp))
 
@@ -238,24 +253,26 @@ fun OutdoorDayScreen(
                 onClick = { showAddMealDialog = true },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(50.dp)
+                    .height(52.dp)
                     .testTag("add_outdoor_meal_button"),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = NutriDark,
-                    contentColor = Color.White
+                    containerColor = com.example.ui.theme.ApexNeonLime,
+                    contentColor = com.example.ui.theme.ApexBlack
                 )
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
                     contentDescription = null,
-                    modifier = Modifier.size(18.dp)
+                    tint = com.example.ui.theme.ApexBlack,
+                    modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "Aggiungi pasto",
                     fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.Bold,
+                    color = com.example.ui.theme.ApexBlack
                 )
             }
         }
@@ -314,6 +331,16 @@ fun OutdoorDayScreen(
                     ingredientsJson = Ingredient.listToJson(ings)
                 )
                 showAddMealDialog = false
+            }
+        )
+    }
+
+    if (showNewPlanDialog) {
+        NewPlanDialog(
+            onDismiss = { showNewPlanDialog = false },
+            onConfirm = { name, cal, prot, c, f, meals ->
+                viewModel.createPlan(name, cal, prot, c, f, meals, makeActive = true)
+                showNewPlanDialog = false
             }
         )
     }
@@ -453,7 +480,7 @@ private fun MacroProgressBar(
                 .height(6.dp)
                 .clip(RoundedCornerShape(3.dp)),
             color = iconColor,
-            trackColor = Color(0xFFF3F4F6)
+            trackColor = Color(0xFF1E2433)
         )
     }
 }
@@ -468,10 +495,10 @@ private fun LoggedMealCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(14.dp))
+            .border(1.dp, com.example.ui.theme.ApexBorder, RoundedCornerShape(14.dp))
             .clickable { onClick() }
             .testTag("logged_meal_${meal.id}"),
-        color = Color(0xFFFAFAFA)
+        color = com.example.ui.theme.ApexDarkSurfaceHighlight
     ) {
         Row(
             modifier = Modifier
@@ -513,7 +540,7 @@ private fun LoggedMealCard(
                     text = "${meal.calories} kcal • P ${meal.protein}g • C ${meal.carbs}g • G ${meal.fat}g",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = NutriCalories
+                    color = com.example.ui.theme.ApexNeonLime
                 )
 
                 Spacer(modifier = Modifier.height(2.dp))

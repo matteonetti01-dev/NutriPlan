@@ -168,3 +168,28 @@ data class LoggedMealEntity(
             return emptyList()
         }
 }
+
+@Entity(
+    tableName = "shopping_items",
+    foreignKeys = [
+        ForeignKey(
+            entity = PlanEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["planId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("planId")]
+)
+data class ShoppingItemEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val planId: Long,
+    val name: String,
+    val quantity: String = "",
+    val packageCount: Int = 1,
+    val packageGrammage: String = "",
+    val category: String = "Altro",
+    val isChecked: Boolean = false,
+    val isCustom: Boolean = false,
+    val notes: String = ""
+)

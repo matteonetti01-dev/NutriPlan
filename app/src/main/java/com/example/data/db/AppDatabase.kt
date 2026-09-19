@@ -9,15 +9,17 @@ import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
+import com.example.data.entity.ShoppingItemEntity
 
 @Database(
     entities = [
         PlanEntity::class,
         MealSlotEntity::class,
         MealAlternativeEntity::class,
-        LoggedMealEntity::class
+        LoggedMealEntity::class,
+        ShoppingItemEntity::class
     ],
-    version = 3,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

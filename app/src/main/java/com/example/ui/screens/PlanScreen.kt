@@ -1,5 +1,11 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -26,15 +32,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.outlined.Info
+import androidx.core.content.ContextCompat
+import com.example.util.CameraUtils
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -56,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -64,30 +77,43 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.ai.ImportedAlternative
+import com.example.ai.ImportedSlotWithAlternatives
 import com.example.data.entity.Ingredient
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
 import com.example.ui.components.AlternativeDetailSheet
+import com.example.ui.components.EmptyPlanCard
 import com.example.ui.components.MealDialog
-import com.example.ui.theme.NutriBadgeBg
-import com.example.ui.theme.NutriBadgeText
-import com.example.ui.theme.NutriBgLight
-import com.example.ui.theme.NutriCardBg
-import com.example.ui.theme.NutriCardBorder
-import com.example.ui.theme.NutriDark
-import com.example.ui.theme.NutriGreen
-import com.example.ui.theme.NutriTextMuted
-import com.example.ui.theme.NutriTextPrimary
-import com.example.ui.theme.NutriTextSecondary
-import com.example.ui.theme.nutriTextFieldColors
+import com.example.ui.components.NewPlanDialog
+import com.example.ui.theme.*
 import com.example.ui.viewmodel.NutritionViewModel
 import kotlinx.coroutines.launch
+
+private fun getFileNameFromUri(context: android.content.Context, uri: Uri): String {
+    var result = "documento"
+    try {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex != -1) {
+                    result = it.getString(nameIndex) ?: "documento"
+                }
+            }
+        }
+    } catch (e: Exception) {
+        // ignore
+    }
+    return result
+}
 
 @Composable
 fun PlanScreen(
     viewModel: NutritionViewModel
 ) {
+    val context = LocalContext.current
     val activePlan by viewModel.activePlan.collectAsState()
     val slots by viewModel.activePlanSlots.collectAsState()
     val alternatives by viewModel.activePlanAlternatives.collectAsState()
@@ -100,37 +126,227 @@ fun PlanScreen(
         mutableStateMapOf<Long, Boolean>()
     }
 
+    var showNewPlanDialog by remember { mutableStateOf(false) }
     var addingToSlot by remember { mutableStateOf<MealSlotEntity?>(null) }
     var slotToEdit by remember { mutableStateOf<MealSlotEntity?>(null) }
     var selectedAlternativeForDetail by remember { mutableStateOf<MealAlternativeEntity?>(null) }
 
-    // Total calculations across all meal slots vs the plan targets
-    val currentPlan = activePlan
-    val (totalSlotsCal, totalSlotsProt, totalSlotsCarbs, totalSlotsFat) = remember(currentPlan, slots) {
-        if (currentPlan == null) {
-            listOf(0, 0, 0, 0)
-        } else {
-            val count = currentPlan.mealsCount.coerceAtLeast(1)
-            val propCal = currentPlan.caloriesTarget / count
-            val propProt = currentPlan.proteinTarget / count
-            val propCarbs = currentPlan.carbsTarget / count
-            val propFat = currentPlan.fatTarget / count
+    // States for Document Import with AI into a specific meal slot
+    var slotForDocImport by remember { mutableStateOf<MealSlotEntity?>(null) }
+    var isScanningDoc by remember { mutableStateOf(false) }
+    var scanningFileName by remember { mutableStateOf("") }
+    var scanResultAlternatives by remember { mutableStateOf<List<ImportedAlternative>?>(null) }
+    var scanErrorMessage by remember { mutableStateOf<String?>(null) }
 
-            val cal = slots.sumOf { it.customCalories ?: propCal }
-            val prot = slots.sumOf { it.customProtein ?: propProt }
-            val carbs = slots.sumOf { it.customCarbs ?: propCarbs }
-            val fat = slots.sumOf { it.customFat ?: propFat }
-            listOf(cal, prot, carbs, fat)
+    // States for Full-Plan Document Import with AI (all meals mapped)
+    var isScanningFullPlanDoc by remember { mutableStateOf(false) }
+    var scanningFullPlanFileName by remember { mutableStateOf("") }
+    var fullPlanScanResults by remember { mutableStateOf<List<ImportedSlotWithAlternatives>?>(null) }
+
+    val fullPlanDocumentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val fileName = getFileNameFromUri(context, uri)
+            scanningFullPlanFileName = fileName
+            isScanningFullPlanDoc = true
+            fullPlanScanResults = null
+            scanErrorMessage = null
+
+            scope.launch {
+                try {
+                    val extracted = viewModel.geminiService.extractAllPlanAlternativesFromDocument(
+                        uri = uri,
+                        availableSlots = slots
+                    )
+                    isScanningFullPlanDoc = false
+                    val totalExtracted = extracted.sumOf { it.alternatives.size }
+                    if (totalExtracted > 0) {
+                        fullPlanScanResults = extracted
+                    } else {
+                        scanErrorMessage = "Nessun pasto o alternativa identificata nel file. Assicurati che il file contenga pasti con alimenti e quantità."
+                    }
+                } catch (e: Exception) {
+                    isScanningFullPlanDoc = false
+                    scanErrorMessage = "Errore durante l'analisi del documento del piano: ${e.localizedMessage ?: "Errore sconosciuto"}"
+                }
+            }
         }
     }
 
-    val calDiff = currentPlan?.let { totalSlotsCal - it.caloriesTarget } ?: 0
-    val protDiff = currentPlan?.let { totalSlotsProt - it.proteinTarget } ?: 0
-    val carbsDiff = currentPlan?.let { totalSlotsCarbs - it.carbsTarget } ?: 0
-    val fatDiff = currentPlan?.let { totalSlotsFat - it.fatTarget } ?: 0
+    val documentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val targetSlot = slotForDocImport
+            if (targetSlot != null) {
+                val fileName = getFileNameFromUri(context, uri)
+                scanningFileName = fileName
+                isScanningDoc = true
+                scanResultAlternatives = null
+                scanErrorMessage = null
 
-    val hasMismatch = currentPlan != null && slots.isNotEmpty() &&
-        (calDiff != 0 || protDiff != 0 || carbsDiff != 0 || fatDiff != 0)
+                scope.launch {
+                    try {
+                        val extracted = viewModel.geminiService.extractAlternativesFromDocument(
+                            uri = uri,
+                            mealSlotName = targetSlot.name
+                        )
+                        isScanningDoc = false
+                        if (extracted.isNotEmpty()) {
+                            scanResultAlternatives = extracted
+                        } else {
+                            scanErrorMessage = "Nessuna alternativa trovata nel file per il pasto '${targetSlot.name}'. Assicurati che il file contenga informazioni su alimenti e grammature."
+                        }
+                    } catch (e: Exception) {
+                        isScanningDoc = false
+                        scanErrorMessage = "Impossibile leggere il documento: ${e.localizedMessage ?: "Errore sconosciuto"}"
+                    }
+                }
+            }
+        } else {
+            slotForDocImport = null
+        }
+    }
+
+    var tempFullPlanPhotoUri by remember { mutableStateOf<Uri?>(null) }
+    val fullPlanCameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && tempFullPlanPhotoUri != null) {
+            val photoUri = tempFullPlanPhotoUri!!
+            scanningFullPlanFileName = "Foto piano scattata"
+            isScanningFullPlanDoc = true
+            fullPlanScanResults = null
+            scanErrorMessage = null
+
+            scope.launch {
+                try {
+                    val extracted = viewModel.geminiService.extractAllPlanAlternativesFromDocument(
+                        uri = photoUri,
+                        availableSlots = slots
+                    )
+                    isScanningFullPlanDoc = false
+                    val totalExtracted = extracted.sumOf { it.alternatives.size }
+                    if (totalExtracted > 0) {
+                        fullPlanScanResults = extracted
+                    } else {
+                        scanErrorMessage = "Nessun pasto o alternativa identificata nella foto. Assicurati che il foglio sia ben illuminato e leggibile."
+                    }
+                } catch (e: Exception) {
+                    isScanningFullPlanDoc = false
+                    scanErrorMessage = "Errore durante l'analisi della foto del piano: ${e.localizedMessage ?: "Errore sconosciuto"}"
+                }
+            }
+        }
+    }
+
+    val fullPlanCameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempFullPlanPhotoUri = uri
+                fullPlanCameraLauncher.launch(uri)
+            } catch (e: Exception) {
+                fullPlanDocumentPickerLauncher.launch(arrayOf("*/*"))
+            }
+        } else {
+            fullPlanDocumentPickerLauncher.launch(arrayOf("*/*"))
+        }
+    }
+
+    fun launchCameraForFullPlan() {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPermission) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempFullPlanPhotoUri = uri
+                fullPlanCameraLauncher.launch(uri)
+            } catch (e: Exception) {
+                fullPlanDocumentPickerLauncher.launch(arrayOf("*/*"))
+            }
+        } else {
+            fullPlanCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    var tempSlotPhotoUri by remember { mutableStateOf<Uri?>(null) }
+    val slotCameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && tempSlotPhotoUri != null) {
+            val photoUri = tempSlotPhotoUri!!
+            val targetSlot = slotForDocImport
+            if (targetSlot != null) {
+                scanningFileName = "Foto pasto scattata"
+                isScanningDoc = true
+                scanResultAlternatives = null
+                scanErrorMessage = null
+
+                scope.launch {
+                    try {
+                        val extracted = viewModel.geminiService.extractAlternativesFromDocument(
+                            uri = photoUri,
+                            mealSlotName = targetSlot.name
+                        )
+                        isScanningDoc = false
+                        if (extracted.isNotEmpty()) {
+                            scanResultAlternatives = extracted
+                        } else {
+                            scanErrorMessage = "Nessuna alternativa trovata nella foto per il pasto '${targetSlot.name}'."
+                        }
+                    } catch (e: Exception) {
+                        isScanningDoc = false
+                        scanErrorMessage = "Impossibile leggere la foto: ${e.localizedMessage ?: "Errore sconosciuto"}"
+                    }
+                }
+            }
+        }
+    }
+
+    val slotCameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempSlotPhotoUri = uri
+                slotCameraLauncher.launch(uri)
+            } catch (e: Exception) {
+                documentPickerLauncher.launch(arrayOf("*/*"))
+            }
+        } else {
+            documentPickerLauncher.launch(arrayOf("*/*"))
+        }
+    }
+
+    fun launchCameraForSlot(slot: MealSlotEntity) {
+        slotForDocImport = slot
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPermission) {
+            try {
+                val uri = CameraUtils.createTempImageUri(context)
+                tempSlotPhotoUri = uri
+                slotCameraLauncher.launch(uri)
+            } catch (e: Exception) {
+                documentPickerLauncher.launch(arrayOf("*/*"))
+            }
+        } else {
+            slotCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    val currentPlan = activePlan
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -141,47 +357,148 @@ fun PlanScreen(
                 .testTag("plan_screen")
         ) {
             item {
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // APEX // AI Global Top Header
+                com.example.ui.components.ApexHeader()
+
                 Spacer(modifier = Modifier.height(16.dp))
-
-                // Header Badge "✓ Piano attivo"
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(NutriBadgeBg)
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = null,
-                        tint = NutriGreen,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Piano attivo",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = NutriBadgeText
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
 
                 // Plan Name and Targets
                 activePlan?.let { plan ->
                     Text(
                         text = plan.name,
                         fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        fontWeight = FontWeight.Black,
+                        color = NutriTextPrimary,
+                        letterSpacing = (-0.5).sp
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "${plan.caloriesTarget} kcal • P ${plan.proteinTarget}g • C ${plan.carbsTarget}g • G ${plan.fatTarget}g",
-                        fontSize = 14.sp,
+                        fontSize = 13.5.sp,
                         color = NutriTextSecondary
                     )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Compact AI Diet Import Card (APEX Style)
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .border(1.dp, com.example.ui.theme.ApexBorder, RoundedCornerShape(14.dp))
+                            .testTag("import_full_plan_doc_button"),
+                        shape = RoundedCornerShape(14.dp),
+                        color = com.example.ui.theme.ApexDarkSurface
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(com.example.ui.theme.ApexDarkSurfaceHighlight),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = com.example.ui.theme.ApexNeonLime,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Scansiona Dieta con AI",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = com.example.ui.theme.ApexTextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Estrai automaticamente pasti e alternative da foto o PDF.",
+                                        fontSize = 11.5.sp,
+                                        color = com.example.ui.theme.ApexTextSecondary
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Dual Action Buttons: Scatta Foto (Camera) & Carica File
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { launchCameraForFullPlan() },
+                                    modifier = Modifier
+                                        .weight(1.1f)
+                                        .height(38.dp)
+                                        .testTag("full_plan_camera_button"),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = com.example.ui.theme.ApexNeonLime,
+                                        contentColor = com.example.ui.theme.ApexBlack
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PhotoCamera,
+                                        contentDescription = null,
+                                        tint = com.example.ui.theme.ApexBlack,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Scatta foto", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = com.example.ui.theme.ApexBlack)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        try {
+                                            fullPlanDocumentPickerLauncher.launch(
+                                                arrayOf(
+                                                    "application/pdf",
+                                                    "image/*",
+                                                    "text/*",
+                                                    "*/*"
+                                                )
+                                            )
+                                        } catch (e: Exception) {
+                                            fullPlanDocumentPickerLauncher.launch(arrayOf("*/*"))
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(0.9f)
+                                        .height(38.dp)
+                                        .testTag("full_plan_file_button"),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, com.example.ui.theme.ApexBorder),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = com.example.ui.theme.ApexDarkSurfaceHighlight,
+                                        contentColor = com.example.ui.theme.ApexTextPrimary
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.UploadFile,
+                                        contentDescription = null,
+                                        tint = com.example.ui.theme.ApexTextSecondary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Carica file", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = com.example.ui.theme.ApexTextPrimary)
+                                }
+                            }
+                        }
+                    }
                 } ?: run {
                     Text(
                         text = "Nessun piano attivo",
@@ -192,24 +509,6 @@ fun PlanScreen(
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
-            }
-
-            // Notification Banner if slot sum differs from total plan
-            if (hasMismatch && currentPlan != null) {
-                item {
-                    MismatchNotificationBanner(
-                        plan = currentPlan,
-                        totalCal = totalSlotsCal,
-                        totalProt = totalSlotsProt,
-                        totalCarbs = totalSlotsCarbs,
-                        totalFat = totalSlotsFat,
-                        calDiff = calDiff,
-                        protDiff = protDiff,
-                        carbsDiff = carbsDiff,
-                        fatDiff = fatDiff
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
             }
 
             // Meal Slots
@@ -238,6 +537,24 @@ fun PlanScreen(
                         },
                         onDeleteAlternative = { alt ->
                             viewModel.deleteAlternative(alt)
+                        },
+                        onTakePhoto = {
+                            launchCameraForSlot(slot)
+                        },
+                        onImportDocument = {
+                            slotForDocImport = slot
+                            try {
+                                documentPickerLauncher.launch(
+                                    arrayOf(
+                                        "application/pdf",
+                                        "image/*",
+                                        "text/*",
+                                        "*/*"
+                                    )
+                                )
+                            } catch (e: Exception) {
+                                documentPickerLauncher.launch(arrayOf("*/*"))
+                            }
                         }
                     )
 
@@ -245,23 +562,9 @@ fun PlanScreen(
                 }
             } ?: run {
                 item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color.White)
-                            .border(1.dp, NutriCardBorder, RoundedCornerShape(16.dp))
-                            .padding(28.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Nessun piano attivo al momento.\nVai nella Dashboard per attivare o creare il tuo primo piano.",
-                            fontSize = 14.sp,
-                            color = NutriTextSecondary,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            lineHeight = 20.sp
-                        )
-                    }
+                    EmptyPlanCard(
+                        onCreatePlanClick = { showNewPlanDialog = true }
+                    )
                 }
             }
 
@@ -369,6 +672,118 @@ fun PlanScreen(
             }
         )
     }
+
+    // Modal progress dialog during AI document scanning
+    if (isScanningDoc) {
+        val targetName = slotForDocImport?.name ?: "Pasto"
+        ScanningDocumentDialog(
+            fileName = scanningFileName,
+            slotName = targetName
+        )
+    }
+
+    // Modal progress dialog during AI full-plan scanning
+    if (isScanningFullPlanDoc) {
+        ScanningFullPlanDocumentDialog(
+            fileName = scanningFullPlanFileName,
+            mealsCount = slots.size
+        )
+    }
+
+    // Dialog showing all alternatives extracted across the entire plan
+    fullPlanScanResults?.let { results ->
+        ImportedFullPlanPreviewDialog(
+            fileName = scanningFullPlanFileName,
+            results = results,
+            onDismiss = {
+                fullPlanScanResults = null
+            },
+            onConfirmAddAll = {
+                var totalAdded = 0
+                results.forEach { slotGroup ->
+                    val matchedSlot = slots.find { it.id == slotGroup.slotId }
+                    if (matchedSlot != null) {
+                        slotGroup.alternatives.forEach { alt ->
+                            viewModel.addDirectAlternative(
+                                slotId = matchedSlot.id,
+                                planId = matchedSlot.planId,
+                                name = alt.name,
+                                calories = alt.totalCalories,
+                                protein = alt.totalProtein,
+                                carbs = alt.totalCarbs,
+                                fat = alt.totalFat,
+                                notes = alt.notes,
+                                ingredients = alt.ingredients
+                            )
+                            totalAdded++
+                        }
+                    }
+                }
+                fullPlanScanResults = null
+                scope.launch {
+                    snackbarHostState.showSnackbar("✓ Inserite con successo $totalAdded alternative nei rispettivi pasti del piano!")
+                }
+            }
+        )
+    }
+
+    // Dialog showing alternatives extracted by AI from the document for a single meal slot
+    val pendingAlternatives = scanResultAlternatives
+    val currentImportSlot = slotForDocImport
+    if (pendingAlternatives != null && currentImportSlot != null) {
+        ImportedAlternativesPreviewDialog(
+            slotName = currentImportSlot.name,
+            fileName = scanningFileName,
+            alternatives = pendingAlternatives,
+            onDismiss = {
+                scanResultAlternatives = null
+                slotForDocImport = null
+            },
+            onConfirmAdd = {
+                val count = pendingAlternatives.size
+                val targetSlotName = currentImportSlot.name
+                pendingAlternatives.forEach { alt ->
+                    viewModel.addDirectAlternative(
+                        slotId = currentImportSlot.id,
+                        planId = currentImportSlot.planId,
+                        name = alt.name,
+                        calories = alt.totalCalories,
+                        protein = alt.totalProtein,
+                        carbs = alt.totalCarbs,
+                        fat = alt.totalFat,
+                        notes = alt.notes,
+                        ingredients = alt.ingredients
+                    )
+                }
+                scanResultAlternatives = null
+                slotForDocImport = null
+                scope.launch {
+                    snackbarHostState.showSnackbar("✓ Aggiunte $count alternative a $targetSlotName!")
+                }
+            }
+        )
+    }
+
+    // Error or warning dialog if document could not be read or had no alternatives
+    scanErrorMessage?.let { err ->
+        ScanErrorDialog(
+            errorMessage = err,
+            onDismiss = {
+                scanErrorMessage = null
+                slotForDocImport = null
+            }
+        )
+    }
+
+    if (showNewPlanDialog) {
+        NewPlanDialog(
+            onDismiss = { showNewPlanDialog = false },
+            onConfirm = { name, cal, prot, c, f, meals ->
+                viewModel.createPlan(name, cal, prot, c, f, meals, makeActive = true)
+                showNewPlanDialog = false
+            }
+        )
+    }
 }
 
 @Composable
@@ -382,7 +797,9 @@ private fun MealSlotCard(
     onAddAlternative: () -> Unit,
     onSelectAlternative: (MealAlternativeEntity) -> Unit,
     onLogAlternative: (MealAlternativeEntity) -> Unit,
-    onDeleteAlternative: (MealAlternativeEntity) -> Unit
+    onDeleteAlternative: (MealAlternativeEntity) -> Unit,
+    onTakePhoto: () -> Unit,
+    onImportDocument: () -> Unit
 ) {
     // Proportional target calculation if not custom
     val count = plan.mealsCount.coerceAtLeast(1)
@@ -424,6 +841,36 @@ private fun MealSlotCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Quick camera photo button for this meal slot
+                    IconButton(
+                        onClick = onTakePhoto,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("take_photo_header_${slot.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoCamera,
+                            contentDescription = "Scatta foto con fotocamera",
+                            tint = com.example.ui.theme.ApexNeonLime,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    // Quick import document button for this meal slot
+                    IconButton(
+                        onClick = onImportDocument,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("import_doc_header_${slot.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.UploadFile,
+                            contentDescription = "Importa da archivio con AI",
+                            tint = NutriTextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
                     // Edit slot button (modifies kcal, macro targets and name)
                     IconButton(
                         onClick = onEditSlot,
@@ -507,32 +954,108 @@ private fun MealSlotCard(
                         Spacer(modifier = Modifier.height(10.dp))
                     }
 
-                    // "+ Aggiungi alternativa" Button
-                    Box(
+                    // Primary "+ Aggiungi alternativa" Button matching Mockup Phone 2
+                    OutlinedButton(
+                        onClick = { onAddAlternative() },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFFF9FAFB))
-                            .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
-                            .clickable { onAddAlternative() }
-                            .padding(vertical = 12.dp)
+                            .height(42.dp)
                             .testTag("add_alternative_${slot.id}"),
-                        contentAlignment = Alignment.Center
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.2.dp, com.example.ui.theme.ApexNeonLime),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = com.example.ui.theme.ApexDarkSurfaceHighlight,
+                            contentColor = com.example.ui.theme.ApexNeonLime
+                        )
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = null,
-                                tint = NutriTextPrimary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Aggiungi alternativa",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = NutriTextPrimary
-                            )
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            tint = com.example.ui.theme.ApexNeonLime,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Aggiungi alternativa",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = com.example.ui.theme.ApexNeonLime
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Secondary Quick Actions: "📷 Scatta foto" and "📄 Archivio"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // "📷 Scatta foto" Button
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onTakePhoto() }
+                                .testTag("take_photo_btn_${slot.id}"),
+                            shape = RoundedCornerShape(10.dp),
+                            color = com.example.ui.theme.ApexDarkSurfaceHighlight,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, com.example.ui.theme.ApexBorder)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 9.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoCamera,
+                                    contentDescription = null,
+                                    tint = com.example.ui.theme.ApexNeonLime,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Scatta foto",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = com.example.ui.theme.ApexTextPrimary
+                                )
+                            }
+                        }
+
+                        // "📄 Archivio" Button
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onImportDocument() }
+                                .testTag("import_doc_btn_${slot.id}"),
+                            shape = RoundedCornerShape(10.dp),
+                            color = com.example.ui.theme.ApexDarkSurfaceHighlight,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, com.example.ui.theme.ApexBorder)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 9.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.UploadFile,
+                                    contentDescription = null,
+                                    tint = NutriTextSecondary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Archivio",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = NutriTextPrimary
+                                )
+                            }
                         }
                     }
                 }
@@ -552,10 +1075,10 @@ private fun AlternativeItemCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
+            .border(1.dp, com.example.ui.theme.ApexBorder, RoundedCornerShape(12.dp))
             .clickable { onClick() }
             .testTag("alternative_item_${alternative.id}"),
-        color = Color(0xFFFAFAFA)
+        color = com.example.ui.theme.ApexDarkSurfaceHighlight
     ) {
         Row(
             modifier = Modifier
@@ -626,13 +1149,13 @@ private fun AlternativeItemCard(
                     modifier = Modifier
                         .size(32.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFE8F5E9))
+                        .background(Color(0xFF1C2B14))
                         .testTag("log_alternative_${alternative.id}")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Check,
                         contentDescription = "Segna come mangiato oggi",
-                        tint = NutriGreen,
+                        tint = com.example.ui.theme.ApexNeonLime,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -651,173 +1174,6 @@ private fun AlternativeItemCard(
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun MismatchNotificationBanner(
-    plan: PlanEntity,
-    totalCal: Int,
-    totalProt: Int,
-    totalCarbs: Int,
-    totalFat: Int,
-    calDiff: Int,
-    protDiff: Int,
-    carbsDiff: Int,
-    fatDiff: Int
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, Color(0xFFFDE68A), RoundedCornerShape(14.dp))
-            .testTag("mismatch_notification_banner"),
-        color = Color(0xFFFFFBEB)
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFFEF3C7)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Info,
-                        contentDescription = null,
-                        tint = Color(0xFFD97706),
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "Discrepanza obiettivi pasti",
-                            fontSize = 13.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF92400E)
-                        )
-                        Text(
-                            text = "Informativa",
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFFB45309),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color(0xFFFEF3C7))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "La somma dei tuoi pasti differisce dall'obiettivo giornaliero (${plan.caloriesTarget} kcal). Puoi comunque continuare a usare l'app senza blocchi.",
-                        fontSize = 11.5.sp,
-                        color = Color(0xFFB45309),
-                        lineHeight = 15.sp
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Badges showing differences
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                MacroDiffBadge(
-                    label = "Kcal",
-                    current = totalCal,
-                    target = plan.caloriesTarget,
-                    diff = calDiff,
-                    unit = "",
-                    modifier = Modifier.weight(1f)
-                )
-                MacroDiffBadge(
-                    label = "Prot",
-                    current = totalProt,
-                    target = plan.proteinTarget,
-                    diff = protDiff,
-                    unit = "g",
-                    modifier = Modifier.weight(1f)
-                )
-                MacroDiffBadge(
-                    label = "Carb",
-                    current = totalCarbs,
-                    target = plan.carbsTarget,
-                    diff = carbsDiff,
-                    unit = "g",
-                    modifier = Modifier.weight(1f)
-                )
-                MacroDiffBadge(
-                    label = "Gras",
-                    current = totalFat,
-                    target = plan.fatTarget,
-                    diff = fatDiff,
-                    unit = "g",
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun MacroDiffBadge(
-    label: String,
-    current: Int,
-    target: Int,
-    diff: Int,
-    unit: String,
-    modifier: Modifier = Modifier
-) {
-    val isExact = diff == 0
-    val diffText = when {
-        diff > 0 -> "+$diff$unit"
-        diff < 0 -> "$diff$unit"
-        else -> "OK"
-    }
-
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (isExact) Color(0xFFECFDF5) else Color(0xFFFEF3C7))
-            .border(
-                1.dp,
-                if (isExact) Color(0xFFA7F3D0) else Color(0xFFFDE68A),
-                RoundedCornerShape(8.dp)
-            )
-            .padding(horizontal = 4.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = label,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (isExact) Color(0xFF047857) else Color(0xFF92400E)
-            )
-            Text(
-                text = diffText,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = if (isExact) Color(0xFF047857) else Color(0xFFB45309)
-            )
-            Text(
-                text = "$current/$target",
-                fontSize = 9.sp,
-                color = if (isExact) Color(0xFF059669) else Color(0xFFB45309)
-            )
         }
     }
 }
@@ -869,7 +1225,8 @@ private fun EditSlotDialog(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(20.dp)),
-            color = Color.White
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder)
         ) {
             Column(
                 modifier = Modifier
@@ -887,13 +1244,13 @@ private fun EditSlotDialog(
                         text = "Modifica Pasto ${slot.orderIndex}",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Chiudi",
-                            tint = NutriTextSecondary
+                            tint = ApexTextSecondary
                         )
                     }
                 }
@@ -903,7 +1260,7 @@ private fun EditSlotDialog(
                 Text(
                     text = "Personalizza nome, calorie e macronutrienti target per questo pasto.",
                     fontSize = 12.sp,
-                    color = NutriTextSecondary
+                    color = ApexTextSecondary
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -913,7 +1270,7 @@ private fun EditSlotDialog(
                     text = "Nome del pasto",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = NutriTextSecondary
+                    color = ApexTextSecondary
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
@@ -922,7 +1279,7 @@ private fun EditSlotDialog(
                     singleLine = true,
                     shape = RoundedCornerShape(10.dp),
                     colors = nutriTextFieldColors(),
-                    textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
+                    textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("edit_slot_name_input")
@@ -940,7 +1297,7 @@ private fun EditSlotDialog(
                             text = "Calorie (kcal)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = NutriTextSecondary
+                            color = ApexTextSecondary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
@@ -950,7 +1307,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_calories_input")
@@ -962,7 +1319,7 @@ private fun EditSlotDialog(
                             text = "Proteine (g)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = NutriTextSecondary
+                            color = ApexTextSecondary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
@@ -972,7 +1329,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_protein_input")
@@ -992,7 +1349,7 @@ private fun EditSlotDialog(
                             text = "Carboidrati (g)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = NutriTextSecondary
+                            color = ApexTextSecondary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
@@ -1002,7 +1359,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_carbs_input")
@@ -1014,7 +1371,7 @@ private fun EditSlotDialog(
                             text = "Grassi (g)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = NutriTextSecondary
+                            color = ApexTextSecondary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
@@ -1024,7 +1381,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_fat_input")
@@ -1040,8 +1397,8 @@ private fun EditSlotDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFFFFFBEB))
-                            .border(1.dp, Color(0xFFFDE68A), RoundedCornerShape(10.dp))
+                            .background(Color(0xFF251C08))
+                            .border(1.dp, Color(0xFF5E491B), RoundedCornerShape(10.dp))
                             .padding(10.dp)
                     ) {
                         Column {
@@ -1049,7 +1406,7 @@ private fun EditSlotDialog(
                                 Icon(
                                     imageVector = Icons.Outlined.Info,
                                     contentDescription = null,
-                                    tint = Color(0xFFD97706),
+                                    tint = Color(0xFFFBBF24),
                                     modifier = Modifier.size(15.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -1057,14 +1414,14 @@ private fun EditSlotDialog(
                                     text = "Somma pasti vs totale piano",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF92400E)
+                                    color = Color(0xFFFDE68A)
                                 )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = "Kcal totali con questa modifica: $totalCalPreview / ${plan.caloriesTarget} (${if (calDiff > 0) "+$calDiff" else "$calDiff"} kcal)\nPuoi comunque salvare e continuare a usare l'app.",
                                 fontSize = 11.5.sp,
-                                color = Color(0xFFB45309),
+                                color = ApexTextSecondary,
                                 lineHeight = 16.sp
                             )
                         }
@@ -1074,22 +1431,22 @@ private fun EditSlotDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFFF0FDF4))
-                            .border(1.dp, Color(0xFFBBF7D0), RoundedCornerShape(10.dp))
+                            .background(Color(0xFF0D2818))
+                            .border(1.dp, Color(0xFF1B5E20), RoundedCornerShape(10.dp))
                             .padding(10.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = Icons.Default.Check,
                                 contentDescription = null,
-                                tint = Color(0xFF16A34A),
+                                tint = ApexGreen,
                                 modifier = Modifier.size(15.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = "Perfetto! La somma dei pasti coincide con l'obiettivo (${plan.caloriesTarget} kcal).",
                                 fontSize = 11.5.sp,
-                                color = Color(0xFF15803D)
+                                color = ApexGreen
                             )
                         }
                     }
@@ -1106,9 +1463,13 @@ private fun EditSlotDialog(
                         modifier = Modifier
                             .weight(1f)
                             .height(44.dp),
-                        shape = RoundedCornerShape(10.dp)
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = ApexTextSecondary
+                        )
                     ) {
-                        Text("Annulla", color = NutriTextSecondary)
+                        Text("Annulla", color = ApexTextSecondary)
                     }
 
                     Button(
@@ -1122,11 +1483,759 @@ private fun EditSlotDialog(
                             .testTag("submit_edit_slot_button"),
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = NutriDark,
-                            contentColor = Color.White
+                            containerColor = ApexNeonLime,
+                            contentColor = ApexBlack
                         )
                     ) {
-                        Text("Salva", fontWeight = FontWeight.SemiBold)
+                        Text("Salva", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScanningDocumentDialog(
+    fileName: String,
+    slotName: String
+) {
+    Dialog(onDismissRequest = { /* Modal while analyzing */ }) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(54.dp)
+                        .clip(CircleShape)
+                        .background(ApexNeonLime.copy(alpha = 0.15f))
+                        .border(1.dp, ApexNeonLime.copy(alpha = 0.35f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = ApexNeonLime,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Scansione con AI in corso",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ApexTextPrimary,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Pasto di destinazione: $slotName",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ApexCyanAccent,
+                    textAlign = TextAlign.Center
+                )
+
+                if (fileName.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "File: $fileName",
+                        fontSize = 12.sp,
+                        color = ApexTextSecondary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                CircularProgressIndicator(
+                    color = ApexNeonLime,
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.size(36.dp)
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "L'AI sta analizzando il documento ed estraendo le varie alternative salvate con alimenti, porzioni e valori nutrizionali...",
+                    fontSize = 12.sp,
+                    color = ApexTextSecondary,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 17.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImportedAlternativesPreviewDialog(
+    slotName: String,
+    fileName: String,
+    alternatives: List<ImportedAlternative>,
+    onDismiss: () -> Unit,
+    onConfirmAdd: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 20.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(ApexNeonLime.copy(alpha = 0.15f))
+                                .border(1.dp, ApexNeonLime.copy(alpha = 0.35f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = ApexNeonLime,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Alternative trovate (${alternatives.size})",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ApexTextPrimary
+                            )
+                            Text(
+                                text = "Pasto: $slotName",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = ApexCyanAccent
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Chiudi",
+                            tint = ApexTextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "I seguenti pasti sono stati estratti dal file \"$fileName\". Verranno aggiunti a \"$slotName\" senza eliminare le alternative esistenti.",
+                    fontSize = 12.sp,
+                    color = ApexTextSecondary,
+                    lineHeight = 16.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Scrollable list of extracted alternatives
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    alternatives.forEach { alt ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            color = ApexDarkSurfaceHighlight,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = alt.name,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ApexTextPrimary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = "${alt.totalCalories} kcal",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ApexCalories
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                // Macros tag
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "P: ${alt.totalProtein}g",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ApexProtein
+                                    )
+                                    Text(
+                                        text = "•",
+                                        fontSize = 10.sp,
+                                        color = ApexBorder
+                                    )
+                                    Text(
+                                        text = "C: ${alt.totalCarbs}g",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ApexCarbs
+                                    )
+                                    Text(
+                                        text = "•",
+                                        fontSize = 10.sp,
+                                        color = ApexBorder
+                                    )
+                                    Text(
+                                        text = "G: ${alt.totalFat}g",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ApexFats
+                                    )
+                                }
+
+                                if (alt.ingredients.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = alt.ingredients.joinToString(", ") { "${it.name} (${it.quantity})" },
+                                        fontSize = 11.sp,
+                                        color = ApexTextSecondary,
+                                        maxLines = 3
+                                    )
+                                }
+
+                                if (alt.notes.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Note: ${alt.notes}",
+                                        fontSize = 11.sp,
+                                        color = ApexTextMuted,
+                                        maxLines = 2
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = ApexTextSecondary
+                        )
+                    ) {
+                        Text("Annulla", fontSize = 13.sp)
+                    }
+
+                    Button(
+                        onClick = onConfirmAdd,
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ApexNeonLime,
+                            contentColor = ApexBlack
+                        )
+                    ) {
+                        Text(
+                            text = "Aggiungi (${alternatives.size})",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScanErrorDialog(
+    errorMessage: String,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2C0D0E))
+                        .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = null,
+                        tint = Color(0xFFFF4D4D),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = "Importazione documento",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ApexTextPrimary,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = errorMessage,
+                    fontSize = 13.sp,
+                    color = ApexTextSecondary,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 18.sp
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = ApexNeonLime,
+                        contentColor = ApexBlack
+                    )
+                ) {
+                    Text("Ho capito", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScanningFullPlanDocumentDialog(
+    fileName: String,
+    mealsCount: Int
+) {
+    Dialog(onDismissRequest = { /* Modal while analyzing */ }) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(ApexNeonLime.copy(alpha = 0.15f))
+                        .border(1.dp, ApexNeonLime.copy(alpha = 0.35f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = ApexNeonLime,
+                        modifier = Modifier.size(30.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Scansione Intero Piano",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ApexTextPrimary,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Analisi e associazione automatica a $mealsCount pasti",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ApexCyanAccent,
+                    textAlign = TextAlign.Center
+                )
+
+                if (fileName.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "File: $fileName",
+                        fontSize = 12.sp,
+                        color = ApexTextSecondary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                CircularProgressIndicator(
+                    color = ApexNeonLime,
+                    strokeWidth = 3.5.dp,
+                    modifier = Modifier.size(38.dp)
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "L'AI sta leggendo il documento completo, individuando tutte le alternative per ogni momento della giornata (colazione, spuntini, pranzo, cena) e calcolando i relativi valori nutrizionali...",
+                    fontSize = 12.sp,
+                    color = ApexTextSecondary,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 17.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImportedFullPlanPreviewDialog(
+    fileName: String,
+    results: List<ImportedSlotWithAlternatives>,
+    onDismiss: () -> Unit,
+    onConfirmAddAll: () -> Unit
+) {
+    val totalAlternatives = results.sumOf { it.alternatives.size }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .fillMaxWidth()
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(ApexNeonLime.copy(alpha = 0.15f))
+                                .border(1.dp, ApexNeonLime.copy(alpha = 0.35f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = ApexNeonLime,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Piano Generale Estratto",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ApexTextPrimary
+                            )
+                            Text(
+                                text = "$totalAlternatives alternative in ${results.size} pasti",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = ApexCyanAccent
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Chiudi",
+                            tint = ApexTextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "L'AI ha distribuito le opzioni del file \"$fileName\" nei rispettivi pasti del tuo piano. Le nuove alternative si aggiungeranno a quelle esistenti.",
+                    fontSize = 12.sp,
+                    color = ApexTextSecondary,
+                    lineHeight = 16.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Scrollable container grouped by meal slot
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    results.forEach { slotGroup ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(ApexDarkSurfaceHighlight)
+                                .border(1.dp, ApexBorder, RoundedCornerShape(14.dp))
+                                .padding(12.dp)
+                        ) {
+                            // Meal Slot Header
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(ApexNeonLime.copy(alpha = 0.15f))
+                                            .border(0.8.dp, ApexNeonLime.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "Pasto ${slotGroup.slotOrderIndex}",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ApexNeonLime
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = slotGroup.slotName,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ApexTextPrimary
+                                    )
+                                }
+                                Text(
+                                    text = "${slotGroup.alternatives.size} alternative",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ApexTextSecondary
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Alternatives for this meal slot
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                slotGroup.alternatives.forEach { alt ->
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = ApexDarkSurface,
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder)
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = alt.name,
+                                                    fontSize = 12.5.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = ApexTextPrimary,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Text(
+                                                    text = "${alt.totalCalories} kcal",
+                                                    fontSize = 12.5.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = ApexCalories
+                                                )
+                                            }
+
+                                            Spacer(modifier = Modifier.height(4.dp))
+
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "P: ${alt.totalProtein}g",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = ApexProtein
+                                                )
+                                                Text(
+                                                    text = "•",
+                                                    fontSize = 9.sp,
+                                                    color = ApexBorder
+                                                )
+                                                Text(
+                                                    text = "C: ${alt.totalCarbs}g",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = ApexCarbs
+                                                )
+                                                Text(
+                                                    text = "•",
+                                                    fontSize = 9.sp,
+                                                    color = ApexBorder
+                                                )
+                                                Text(
+                                                    text = "G: ${alt.totalFat}g",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = ApexFats
+                                                )
+                                            }
+
+                                            if (alt.ingredients.isNotEmpty()) {
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    text = alt.ingredients.joinToString(", ") { "${it.name} (${it.quantity})" },
+                                                    fontSize = 10.5.sp,
+                                                    color = ApexTextSecondary,
+                                                    maxLines = 2
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Action Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = ApexTextSecondary
+                        )
+                    ) {
+                        Text("Annulla", color = ApexTextSecondary, fontSize = 13.sp)
+                    }
+
+                    Button(
+                        onClick = onConfirmAddAll,
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .height(44.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ApexNeonLime,
+                            contentColor = ApexBlack
+                        )
+                    ) {
+                        Text(
+                            text = "Aggiungi tutte ($totalAlternatives)",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

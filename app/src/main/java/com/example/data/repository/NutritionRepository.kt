@@ -6,6 +6,7 @@ import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
+import com.example.data.entity.ShoppingItemEntity
 import kotlinx.coroutines.flow.Flow
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -192,6 +193,25 @@ class NutritionRepository(private val dao: NutritionDao) {
     suspend fun deleteLoggedMeal(meal: LoggedMealEntity) {
         dao.deleteLoggedMeal(meal)
     }
+
+    // --- Shopping List (Spesa) ---
+    fun getShoppingItemsForPlan(planId: Long): Flow<List<ShoppingItemEntity>> = dao.getShoppingItemsForPlan(planId)
+
+    suspend fun getShoppingItemsForPlanSync(planId: Long): List<ShoppingItemEntity> = dao.getShoppingItemsForPlanSync(planId)
+
+    suspend fun insertShoppingItem(item: ShoppingItemEntity): Long = dao.insertShoppingItem(item)
+
+    suspend fun insertShoppingItems(items: List<ShoppingItemEntity>) = dao.insertShoppingItems(items)
+
+    suspend fun updateShoppingItem(item: ShoppingItemEntity) = dao.updateShoppingItem(item)
+
+    suspend fun deleteShoppingItem(item: ShoppingItemEntity) = dao.deleteShoppingItem(item)
+
+    suspend fun clearShoppingItemsForPlan(planId: Long) = dao.clearShoppingItemsForPlan(planId)
+
+    suspend fun setAllShoppingItemsChecked(planId: Long, checked: Boolean) = dao.setAllShoppingItemsChecked(planId, checked)
+
+    suspend fun deleteCheckedShoppingItems(planId: Long) = dao.deleteCheckedShoppingItems(planId)
 
     companion object {
         fun getTodayDateString(): String {
