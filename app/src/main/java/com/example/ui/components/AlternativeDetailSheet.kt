@@ -66,8 +66,19 @@ import com.example.data.entity.Ingredient
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
 import com.example.data.entity.PlanEntity
+import com.example.ui.theme.ApexBlack
 import com.example.ui.theme.ApexBorder
+import com.example.ui.theme.ApexCalories
+import com.example.ui.theme.ApexCarbs
+import com.example.ui.theme.ApexDarkSurface
 import com.example.ui.theme.ApexDarkSurfaceHighlight
+import com.example.ui.theme.ApexFats
+import com.example.ui.theme.ApexNeonLime
+import com.example.ui.theme.ApexNeonLimeDim
+import com.example.ui.theme.ApexProtein
+import com.example.ui.theme.ApexTextMuted
+import com.example.ui.theme.ApexTextPrimary
+import com.example.ui.theme.ApexTextSecondary
 import com.example.ui.theme.NutriCalories
 import com.example.ui.theme.NutriCarbs
 import com.example.ui.theme.NutriDark
@@ -96,6 +107,7 @@ fun AlternativeDetailSheet(
     currentSlot: MealSlotEntity?,
     allSlots: List<MealSlotEntity>,
     geminiService: GeminiNutritionService? = null,
+    foodDatabaseRepository: com.example.data.repository.FoodDatabaseRepository? = null,
     activePlan: PlanEntity? = null,
     onDismiss: () -> Unit,
     onSave: (MealAlternativeEntity) -> Unit,
@@ -105,6 +117,13 @@ fun AlternativeDetailSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val coroutineScope = rememberCoroutineScope()
+    val localContext = androidx.compose.ui.platform.LocalContext.current
+    val actualFoodRepo = remember(foodDatabaseRepository) {
+        foodDatabaseRepository ?: com.example.data.repository.FoodDatabaseRepository(
+            localContext,
+            com.example.data.db.AppDatabase.getDatabase(localContext).nutritionDao()
+        )
+    }
 
     var name by remember { mutableStateOf(alternative.name) }
     var notes by remember { mutableStateOf(alternative.notes) }
@@ -158,7 +177,16 @@ fun AlternativeDetailSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color.White,
+        containerColor = ApexDarkSurface,
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .size(width = 36.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(ApexBorder)
+            )
+        },
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     ) {
         Column(
@@ -166,7 +194,9 @@ fun AlternativeDetailSheet(
                 .fillMaxWidth()
                 .verticalScroll(scrollState)
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 36.dp)
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(bottom = 56.dp)
         ) {
             // Header Row
             Row(
@@ -179,13 +209,13 @@ fun AlternativeDetailSheet(
                         text = "Dettaglio Alternativa",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     currentSlot?.let {
                         Text(
                             text = "Nel pasto: ${it.name} (Pasto ${it.orderIndex})",
                             fontSize = 12.5.sp,
-                            color = NutriTextSecondary
+                            color = ApexTextSecondary
                         )
                     }
                 }
@@ -194,7 +224,7 @@ fun AlternativeDetailSheet(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Chiudi",
-                        tint = NutriTextSecondary
+                        tint = ApexTextMuted
                     )
                 }
             }
@@ -213,23 +243,25 @@ fun AlternativeDetailSheet(
                         .height(40.dp)
                         .testTag("copy_alternative_button"),
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NutriDark)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ApexTextPrimary)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ContentCopy,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
-                        tint = NutriDark
+                        tint = ApexNeonLime
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "Copia in altro pasto",
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        color = ApexTextPrimary
                     )
                 }
 
-                OutlinedButton(
+                Button(
                     onClick = {
                         onLog(alternative)
                         onDismiss()
@@ -238,26 +270,29 @@ fun AlternativeDetailSheet(
                         .height(40.dp)
                         .testTag("log_from_sheet_button"),
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NutriGreen)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = ApexNeonLime,
+                        contentColor = ApexBlack
+                    )
                 ) {
                     Icon(
                         imageVector = Icons.Default.Check,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
-                        tint = NutriGreen
+                        tint = ApexBlack
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "Mangia oggi",
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = NutriGreen
+                        fontWeight = FontWeight.Bold,
+                        color = ApexBlack
                     )
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = Color(0xFFF3F4F6))
+            HorizontalDivider(color = ApexBorder)
             Spacer(modifier = Modifier.height(16.dp))
 
             // Nome Alternativa
@@ -316,7 +351,7 @@ fun AlternativeDetailSheet(
                     text = "Valori nutrizionali totali",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
-                    color = NutriTextPrimary
+                    color = ApexTextPrimary
                 )
 
                 if (ingredients.isNotEmpty()) {
@@ -328,14 +363,14 @@ fun AlternativeDetailSheet(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = null,
                             modifier = Modifier.size(13.dp),
-                            tint = NutriDark
+                            tint = ApexNeonLime
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Ricalcola da cibi",
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = NutriDark
+                            color = ApexNeonLime
                         )
                     }
                 }
@@ -352,7 +387,7 @@ fun AlternativeDetailSheet(
                     value = totalCalories,
                     onValueChange = { totalCalories = it },
                     unit = "kcal",
-                    accentColor = NutriCalories,
+                    accentColor = ApexCalories,
                     modifier = Modifier.weight(1f),
                     tag = "sheet_total_cal"
                 )
@@ -361,7 +396,7 @@ fun AlternativeDetailSheet(
                     value = totalProtein,
                     onValueChange = { totalProtein = it },
                     unit = "g",
-                    accentColor = NutriProtein,
+                    accentColor = ApexProtein,
                     modifier = Modifier.weight(1f),
                     tag = "sheet_total_prot"
                 )
@@ -370,7 +405,7 @@ fun AlternativeDetailSheet(
                     value = totalCarbs,
                     onValueChange = { totalCarbs = it },
                     unit = "g",
-                    accentColor = NutriCarbs,
+                    accentColor = ApexCarbs,
                     modifier = Modifier.weight(1f),
                     tag = "sheet_total_carbs"
                 )
@@ -379,14 +414,14 @@ fun AlternativeDetailSheet(
                     value = totalFat,
                     onValueChange = { totalFat = it },
                     unit = "g",
-                    accentColor = NutriFats,
+                    accentColor = ApexFats,
                     modifier = Modifier.weight(1f),
                     tag = "sheet_total_fat"
                 )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
-            HorizontalDivider(color = Color(0xFFF3F4F6))
+            HorizontalDivider(color = ApexBorder)
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- SEZIONE: AGGIUNGI CIBO AL PASTO ---
@@ -394,37 +429,66 @@ fun AlternativeDetailSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(14.dp)),
-                color = Color(0xFFF8FAFC)
+                    .border(1.dp, ApexBorder, RoundedCornerShape(14.dp)),
+                color = ApexDarkSurfaceHighlight
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(24.dp)
+                                .size(28.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFE2E8F0)),
+                                .background(ApexBlack)
+                                .border(1.dp, ApexBorder, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Restaurant,
                                 contentDescription = null,
-                                tint = NutriDark,
-                                modifier = Modifier.size(13.dp)
+                                tint = ApexNeonLime,
+                                modifier = Modifier.size(14.dp)
                             )
                         }
                         Text(
                             text = "Aggiungi altro cibo al pasto",
                             fontSize = 13.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = NutriTextPrimary
+                            color = ApexTextPrimary
                         )
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
+
+                    FoodSearchSection(
+                        repository = actualFoodRepo,
+                        onIngredientSelected = { ing ->
+                            ingredients.add(
+                                EditableFoodItem(
+                                    name = ing.name,
+                                    quantity = ing.quantity,
+                                    calories = ing.calories.toString(),
+                                    protein = ing.protein.toString(),
+                                    carbs = ing.carbs.toString(),
+                                    fat = ing.fat.toString()
+                                )
+                            )
+                            recalculateTotals()
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "Oppure inserimento manuale o stima AI:",
+                        fontSize = 11.5.sp,
+                        color = ApexTextSecondary,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -433,11 +497,11 @@ fun AlternativeDetailSheet(
                         OutlinedTextField(
                             value = newFoodName,
                             onValueChange = { newFoodName = it },
-                            placeholder = { Text("Nome cibo (es. Mela, Pane)", fontSize = 12.sp) },
+                            placeholder = { Text("Nome cibo (es. Mela, Pane)", fontSize = 12.sp, color = ApexTextMuted) },
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 13.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 13.sp),
                             modifier = Modifier
                                 .weight(1.3f)
                                 .testTag("add_food_name_input")
@@ -446,11 +510,11 @@ fun AlternativeDetailSheet(
                         OutlinedTextField(
                             value = newFoodQuantity,
                             onValueChange = { newFoodQuantity = it },
-                            placeholder = { Text("Quantità (es. 100g)", fontSize = 12.sp) },
+                            placeholder = { Text("Quantità (es. 100g)", fontSize = 12.sp, color = ApexTextMuted) },
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 13.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 13.sp),
                             modifier = Modifier
                                 .weight(0.9f)
                                 .testTag("add_food_qty_input")
@@ -499,26 +563,27 @@ fun AlternativeDetailSheet(
                                     .testTag("estimate_and_add_food_btn"),
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = NutriDark,
-                                    contentColor = Color.White
+                                    containerColor = ApexNeonLime,
+                                    contentColor = ApexBlack
                                 )
                             ) {
                                 if (isEstimatingFood) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(14.dp),
-                                        color = Color.White,
+                                        color = ApexBlack,
                                         strokeWidth = 2.dp
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Stima in corso...", fontSize = 11.5.sp)
+                                    Text("Stima in corso...", fontSize = 11.5.sp, color = ApexBlack)
                                 } else {
                                     Icon(
                                         imageVector = Icons.Default.Add,
                                         contentDescription = null,
+                                        tint = ApexBlack,
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Stima AI & Aggiungi", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("Stima AI & Aggiungi", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = ApexBlack)
                                 }
                             }
                         }
@@ -547,12 +612,15 @@ fun AlternativeDetailSheet(
                                 .weight(0.9f)
                                 .height(38.dp)
                                 .testTag("quick_add_food_btn"),
-                            shape = RoundedCornerShape(8.dp)
+                            shape = RoundedCornerShape(8.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ApexTextPrimary)
                         ) {
                             Text(
                                 text = if (newFoodName.isNotBlank()) "+ Aggiungi" else "+ Riga vuota",
                                 fontSize = 11.5.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                color = ApexTextPrimary
                             )
                         }
                     }
@@ -572,12 +640,12 @@ fun AlternativeDetailSheet(
                         text = "Singoli Cibi nel Pasto (${ingredients.size})",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     Text(
                         text = "Valori nutrizionali dettagliati di ogni alimento",
                         fontSize = 11.5.sp,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                 }
             }
@@ -597,7 +665,7 @@ fun AlternativeDetailSheet(
                     Text(
                         text = "Nessun alimento dettagliato. Usa il riquadro sopra per aggiungere cibi!",
                         fontSize = 12.5.sp,
-                        color = NutriTextSecondary,
+                        color = ApexTextMuted,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                 }
@@ -628,16 +696,17 @@ fun AlternativeDetailSheet(
                 OutlinedButton(
                     onClick = { showDeleteConfirmDialog = true },
                     modifier = Modifier
-                        .weight(0.4f)
+                        .weight(0.35f)
                         .height(48.dp)
                         .testTag("delete_alternative_button"),
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFDC2626))
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF7F1D1D)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444))
                 ) {
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,
                         contentDescription = "Elimina",
-                        tint = Color(0xFFDC2626),
+                        tint = Color(0xFFEF4444),
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -674,17 +743,20 @@ fun AlternativeDetailSheet(
                         .testTag("save_alternative_button"),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NutriDark,
-                        contentColor = Color.White
+                        containerColor = ApexNeonLime,
+                        contentColor = ApexBlack
                     )
                 ) {
                     Text(
                         text = "Salva modifiche",
                         fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
+                        fontSize = 14.sp,
+                        color = ApexBlack
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 
@@ -731,21 +803,22 @@ fun AlternativeDetailSheet(
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp)),
-                color = Color.White
+                    .clip(RoundedCornerShape(18.dp)),
+                color = ApexDarkSurface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder)
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
                         text = "Elimina alternativa",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Sei sicuro di voler eliminare questa alternativa dal piano?",
                         fontSize = 13.5.sp,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                     Spacer(modifier = Modifier.height(18.dp))
                     Row(
@@ -753,7 +826,7 @@ fun AlternativeDetailSheet(
                         horizontalArrangement = Arrangement.End
                     ) {
                         TextButton(onClick = { showDeleteConfirmDialog = false }) {
-                            Text("Annulla", color = NutriTextSecondary)
+                            Text("Annulla", color = ApexTextMuted)
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(
@@ -796,7 +869,7 @@ internal fun MacroInputField(
                 text = label,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = NutriTextSecondary
+                color = ApexTextSecondary
             )
         }
         Spacer(modifier = Modifier.height(3.dp))
@@ -808,7 +881,7 @@ internal fun MacroInputField(
             shape = RoundedCornerShape(8.dp),
             colors = nutriTextFieldColors(),
             textStyle = TextStyle(
-                color = NutriTextPrimary,
+                color = ApexTextPrimary,
                 fontSize = 13.5.sp,
                 fontWeight = FontWeight.SemiBold
             ),
@@ -830,8 +903,8 @@ internal fun SingleFoodItemCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp)),
-        color = Color(0xFFFAFAFA)
+            .border(1.dp, ApexBorder, RoundedCornerShape(12.dp)),
+        color = ApexDarkSurfaceHighlight
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             // Header: Name, quantity and delete
@@ -843,12 +916,12 @@ internal fun SingleFoodItemCard(
                 OutlinedTextField(
                     value = item.name,
                     onValueChange = { onUpdate(item.copy(name = it)) },
-                    placeholder = { Text("Nome cibo", fontSize = 12.sp) },
+                    placeholder = { Text("Nome cibo", fontSize = 12.sp, color = ApexTextMuted) },
                     singleLine = true,
                     shape = RoundedCornerShape(8.dp),
                     colors = nutriTextFieldColors(),
                     textStyle = TextStyle(
-                        color = NutriTextPrimary,
+                        color = ApexTextPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
                     ),
@@ -860,11 +933,11 @@ internal fun SingleFoodItemCard(
                 OutlinedTextField(
                     value = item.quantity,
                     onValueChange = { onUpdate(item.copy(quantity = it)) },
-                    placeholder = { Text("es. 100g", fontSize = 12.sp) },
+                    placeholder = { Text("es. 100g", fontSize = 12.sp, color = ApexTextMuted) },
                     singleLine = true,
                     shape = RoundedCornerShape(8.dp),
                     colors = nutriTextFieldColors(),
-                    textStyle = TextStyle(color = NutriTextPrimary, fontSize = 13.sp),
+                    textStyle = TextStyle(color = ApexTextPrimary, fontSize = 13.sp),
                     modifier = Modifier
                         .weight(0.9f)
                         .testTag("ing_qty_$index")
@@ -877,7 +950,7 @@ internal fun SingleFoodItemCard(
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,
                         contentDescription = "Rimuovi alimento",
-                        tint = NutriTextMuted,
+                        tint = ApexProtein,
                         modifier = Modifier.size(17.dp)
                     )
                 }
@@ -894,7 +967,7 @@ internal fun SingleFoodItemCard(
                     label = "Kcal",
                     value = item.calories,
                     onValueChange = { onUpdate(item.copy(calories = it)) },
-                    color = NutriCalories,
+                    color = ApexCalories,
                     modifier = Modifier.weight(1f),
                     tag = "ing_cal_$index"
                 )
@@ -902,7 +975,7 @@ internal fun SingleFoodItemCard(
                     label = "Prot(g)",
                     value = item.protein,
                     onValueChange = { onUpdate(item.copy(protein = it)) },
-                    color = NutriProtein,
+                    color = ApexProtein,
                     modifier = Modifier.weight(1f),
                     tag = "ing_prot_$index"
                 )
@@ -910,7 +983,7 @@ internal fun SingleFoodItemCard(
                     label = "Carb(g)",
                     value = item.carbs,
                     onValueChange = { onUpdate(item.copy(carbs = it)) },
-                    color = NutriCarbs,
+                    color = ApexCarbs,
                     modifier = Modifier.weight(1f),
                     tag = "ing_carbs_$index"
                 )
@@ -918,7 +991,7 @@ internal fun SingleFoodItemCard(
                     label = "Gras(g)",
                     value = item.fat,
                     onValueChange = { onUpdate(item.copy(fat = it)) },
-                    color = NutriFats,
+                    color = ApexFats,
                     modifier = Modifier.weight(1f),
                     tag = "ing_fat_$index"
                 )
@@ -941,7 +1014,7 @@ internal fun SingleFoodMacroSmallInput(
             text = label,
             fontSize = 9.5.sp,
             fontWeight = FontWeight.SemiBold,
-            color = NutriTextSecondary
+            color = ApexTextSecondary
         )
         Spacer(modifier = Modifier.height(2.dp))
         OutlinedTextField(
@@ -952,7 +1025,7 @@ internal fun SingleFoodMacroSmallInput(
             shape = RoundedCornerShape(6.dp),
             colors = nutriTextFieldColors(),
             textStyle = TextStyle(
-                color = NutriTextPrimary,
+                color = ApexTextPrimary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             ),
@@ -976,7 +1049,8 @@ internal fun CopyAlternativeDialog(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(20.dp)),
-            color = Color.White
+            color = ApexDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder)
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
                 Row(
@@ -988,13 +1062,13 @@ internal fun CopyAlternativeDialog(
                         text = "Copia alternativa",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Chiudi",
-                            tint = NutriTextSecondary
+                            tint = ApexTextMuted
                         )
                     }
                 }
@@ -1004,7 +1078,7 @@ internal fun CopyAlternativeDialog(
                 Text(
                     text = "Scegli in quale pasto vuoi duplicare \"$alternativeName\":",
                     fontSize = 13.sp,
-                    color = NutriTextSecondary
+                    color = ApexTextSecondary
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -1037,19 +1111,19 @@ internal fun CopyAlternativeDialog(
                                         text = slot.name,
                                         fontSize = 14.5.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = NutriTextPrimary
+                                        color = ApexTextPrimary
                                     )
                                     Text(
                                         text = "Pasto ${slot.orderIndex}" + (if (slot.customCalories != null) " • ${slot.customCalories} kcal target" else ""),
                                         fontSize = 12.sp,
-                                        color = NutriTextSecondary
+                                        color = ApexTextSecondary
                                     )
                                 }
 
                                 Icon(
                                     imageVector = Icons.Default.ContentCopy,
                                     contentDescription = null,
-                                    tint = NutriDark,
+                                    tint = ApexNeonLime,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -1062,9 +1136,11 @@ internal fun CopyAlternativeDialog(
                 OutlinedButton(
                     onClick = onDismiss,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ApexTextSecondary)
                 ) {
-                    Text("Annulla", color = NutriTextSecondary)
+                    Text("Annulla", color = ApexTextSecondary)
                 }
             }
         }

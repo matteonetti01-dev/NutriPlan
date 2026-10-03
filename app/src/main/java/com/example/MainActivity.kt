@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Flight
@@ -38,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.FirstPlanOnboardingDialog
+import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.OutdoorDayScreen
 import com.example.ui.screens.PlanScreen
@@ -74,11 +77,24 @@ class MainActivity : ComponentActivity() {
 fun MainAppScreen(viewModel: NutritionViewModel) {
     val currentTab by viewModel.currentTab.collectAsState()
     val allPlans by viewModel.allPlans.collectAsState()
+    val hasCompletedOnboarding by viewModel.hasCompletedOnboarding.collectAsState()
+
+    // Mostra la presentazione informativa dell'app a schermo intero senza barra di navigazione
+    if (!hasCompletedOnboarding) {
+        com.example.ui.components.AppOnboardingContent(
+            isReviewMode = false,
+            onFinished = {
+                viewModel.completeOnboarding()
+            }
+        )
+        return
+    }
 
     val navItems = listOf(
         NavItem("Dashboard", Icons.Filled.Dashboard, Icons.Outlined.Dashboard, "tab_dashboard"),
         NavItem("Piano", Icons.Filled.Assignment, Icons.Outlined.Assignment, "tab_piano"),
-        NavItem("Giornata fuori", Icons.Filled.Flight, Icons.Outlined.Flight, "tab_giornata_fuori"),
+        NavItem("Chat", Icons.AutoMirrored.Filled.Chat, Icons.AutoMirrored.Outlined.Chat, "tab_chat"),
+        NavItem("Giornata\u00A0fuori", Icons.Filled.Flight, Icons.Outlined.Flight, "tab_giornata_fuori"),
         NavItem("Impostazioni", Icons.Filled.Settings, Icons.Outlined.Settings, "tab_impostazioni")
     )
 
@@ -107,8 +123,11 @@ fun MainAppScreen(viewModel: NutritionViewModel) {
                         label = {
                             Text(
                                 text = item.title,
-                                fontSize = 10.5.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                fontSize = if (item.title.length > 8) 8.8.sp else 10.sp,
+                                maxLines = 1,
+                                softWrap = false,
+                                letterSpacing = if (item.title.length > 8) (-0.4).sp else (-0.1).sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
                             )
                         },
                         colors = NavigationBarItemDefaults.colors(
@@ -135,12 +154,16 @@ fun MainAppScreen(viewModel: NutritionViewModel) {
                     onNavigateToPlan = { viewModel.selectTab(1) }
                 )
                 1 -> PlanScreen(viewModel = viewModel)
-                2 -> OutdoorDayScreen(viewModel = viewModel)
-                3 -> SettingsScreen(viewModel = viewModel)
+                2 -> ChatScreen(
+                    viewModel = viewModel,
+                    onNavigateToPlan = { viewModel.selectTab(1) }
+                )
+                3 -> OutdoorDayScreen(viewModel = viewModel)
+                4 -> SettingsScreen(viewModel = viewModel)
             }
 
-            // Onboarding popup on first startup if no plans exist yet
             if (allPlans.isEmpty()) {
+                // Onboarding popup on first startup to configure the initial plan
                 FirstPlanOnboardingDialog(
                     onConfirm = { name, cal, prot, c, f, meals ->
                         viewModel.createPlan(

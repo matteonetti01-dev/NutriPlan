@@ -61,8 +61,19 @@ import com.example.ai.GeminiNutritionService
 import com.example.data.entity.Ingredient
 import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealSlotEntity
+import com.example.ui.theme.ApexBlack
 import com.example.ui.theme.ApexBorder
+import com.example.ui.theme.ApexCalories
+import com.example.ui.theme.ApexCarbs
+import com.example.ui.theme.ApexDarkSurface
 import com.example.ui.theme.ApexDarkSurfaceHighlight
+import com.example.ui.theme.ApexFats
+import com.example.ui.theme.ApexNeonLime
+import com.example.ui.theme.ApexNeonLimeDim
+import com.example.ui.theme.ApexProtein
+import com.example.ui.theme.ApexTextMuted
+import com.example.ui.theme.ApexTextPrimary
+import com.example.ui.theme.ApexTextSecondary
 import com.example.ui.theme.NutriCalories
 import com.example.ui.theme.NutriCarbs
 import com.example.ui.theme.NutriDark
@@ -80,6 +91,7 @@ fun LoggedMealDetailSheet(
     meal: LoggedMealEntity,
     planSlots: List<MealSlotEntity>,
     geminiService: GeminiNutritionService? = null,
+    foodDatabaseRepository: com.example.data.repository.FoodDatabaseRepository? = null,
     onDismiss: () -> Unit,
     onSave: (LoggedMealEntity) -> Unit,
     onCopyToPlanSlot: (LoggedMealEntity, MealSlotEntity) -> Unit,
@@ -87,6 +99,13 @@ fun LoggedMealDetailSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val coroutineScope = rememberCoroutineScope()
+    val localContext = androidx.compose.ui.platform.LocalContext.current
+    val actualFoodRepo = remember(foodDatabaseRepository) {
+        foodDatabaseRepository ?: com.example.data.repository.FoodDatabaseRepository(
+            localContext,
+            com.example.data.db.AppDatabase.getDatabase(localContext).nutritionDao()
+        )
+    }
 
     var name by remember { mutableStateOf(meal.name) }
     var time by remember { mutableStateOf(meal.time) }
@@ -139,7 +158,16 @@ fun LoggedMealDetailSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color.White,
+        containerColor = ApexDarkSurface,
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .size(width = 36.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(ApexBorder)
+            )
+        },
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     ) {
         Column(
@@ -160,12 +188,12 @@ fun LoggedMealDetailSheet(
                         text = "Dettaglio Pasto",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     Text(
                         text = "Giornata fuori • ${meal.date}",
                         fontSize = 12.5.sp,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                 }
 
@@ -173,7 +201,7 @@ fun LoggedMealDetailSheet(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Chiudi",
-                        tint = NutriTextSecondary
+                        tint = ApexTextMuted
                     )
                 }
             }
@@ -193,26 +221,28 @@ fun LoggedMealDetailSheet(
                             .height(40.dp)
                             .testTag("copy_outdoor_meal_button"),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NutriDark)
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = ApexTextPrimary)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp),
-                            tint = NutriDark
+                            tint = ApexNeonLime
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "Copia nel Piano alimentare",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            color = ApexTextPrimary
                         )
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
 
-            HorizontalDivider(color = Color(0xFFF3F4F6))
+            HorizontalDivider(color = ApexBorder)
             Spacer(modifier = Modifier.height(16.dp))
 
             // Nome Pasto & Orario
@@ -225,7 +255,7 @@ fun LoggedMealDetailSheet(
                         text = "Nome del pasto",
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
@@ -233,8 +263,8 @@ fun LoggedMealDetailSheet(
                         onValueChange = { name = it },
                         shape = RoundedCornerShape(10.dp),
                         colors = nutriTextFieldColors(),
-                        textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
-                        placeholder = { Text("es. Pranzo fuori") },
+                        textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
+                        placeholder = { Text("es. Pranzo fuori", color = ApexTextMuted) },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -247,7 +277,7 @@ fun LoggedMealDetailSheet(
                         text = "Orario",
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
@@ -255,8 +285,8 @@ fun LoggedMealDetailSheet(
                         onValueChange = { time = it },
                         shape = RoundedCornerShape(10.dp),
                         colors = nutriTextFieldColors(),
-                        textStyle = TextStyle(color = NutriTextPrimary, fontSize = 14.sp),
-                        placeholder = { Text("12:30") },
+                        textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
+                        placeholder = { Text("12:30", color = ApexTextMuted) },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -272,7 +302,7 @@ fun LoggedMealDetailSheet(
                 text = "Note opzionali",
                 fontSize = 12.5.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = NutriTextSecondary
+                color = ApexTextSecondary
             )
             Spacer(modifier = Modifier.height(4.dp))
             OutlinedTextField(
@@ -280,8 +310,8 @@ fun LoggedMealDetailSheet(
                 onValueChange = { notes = it },
                 shape = RoundedCornerShape(10.dp),
                 colors = nutriTextFieldColors(),
-                textStyle = TextStyle(color = NutriTextPrimary, fontSize = 13.5.sp),
-                placeholder = { Text("Note...") },
+                textStyle = TextStyle(color = ApexTextPrimary, fontSize = 13.5.sp),
+                placeholder = { Text("Note...", color = ApexTextMuted) },
                 maxLines = 3,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -300,7 +330,7 @@ fun LoggedMealDetailSheet(
                     text = "Valori nutrizionali totali",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
-                    color = NutriTextPrimary
+                    color = ApexTextPrimary
                 )
 
                 if (ingredients.isNotEmpty()) {
@@ -312,14 +342,14 @@ fun LoggedMealDetailSheet(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = null,
                             modifier = Modifier.size(13.dp),
-                            tint = NutriDark
+                            tint = ApexNeonLime
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Ricalcola da cibi",
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = NutriDark
+                            color = ApexNeonLime
                         )
                     }
                 }
@@ -336,7 +366,7 @@ fun LoggedMealDetailSheet(
                     value = totalCalories,
                     onValueChange = { totalCalories = it },
                     unit = "kcal",
-                    accentColor = NutriCalories,
+                    accentColor = ApexCalories,
                     modifier = Modifier.weight(1f),
                     tag = "logged_sheet_total_cal"
                 )
@@ -345,7 +375,7 @@ fun LoggedMealDetailSheet(
                     value = totalProtein,
                     onValueChange = { totalProtein = it },
                     unit = "g",
-                    accentColor = NutriProtein,
+                    accentColor = ApexProtein,
                     modifier = Modifier.weight(1f),
                     tag = "logged_sheet_total_prot"
                 )
@@ -354,7 +384,7 @@ fun LoggedMealDetailSheet(
                     value = totalCarbs,
                     onValueChange = { totalCarbs = it },
                     unit = "g",
-                    accentColor = NutriCarbs,
+                    accentColor = ApexCarbs,
                     modifier = Modifier.weight(1f),
                     tag = "logged_sheet_total_carbs"
                 )
@@ -363,14 +393,14 @@ fun LoggedMealDetailSheet(
                     value = totalFat,
                     onValueChange = { totalFat = it },
                     unit = "g",
-                    accentColor = NutriFats,
+                    accentColor = ApexFats,
                     modifier = Modifier.weight(1f),
                     tag = "logged_sheet_total_fat"
                 )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
-            HorizontalDivider(color = Color(0xFFF3F4F6))
+            HorizontalDivider(color = ApexBorder)
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- SEZIONE: AGGIUNGI CIBO AL PASTO COMPLETO ---
@@ -378,37 +408,66 @@ fun LoggedMealDetailSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(14.dp)),
-                color = Color(0xFFF8FAFC)
+                    .border(1.dp, ApexBorder, RoundedCornerShape(14.dp)),
+                color = ApexDarkSurfaceHighlight
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(24.dp)
+                                .size(28.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFE2E8F0)),
+                                .background(ApexBlack)
+                                .border(1.dp, ApexBorder, CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Restaurant,
                                 contentDescription = null,
-                                tint = NutriDark,
-                                modifier = Modifier.size(13.dp)
+                                tint = ApexNeonLime,
+                                modifier = Modifier.size(14.dp)
                             )
                         }
                         Text(
                             text = "Aggiungi altro cibo al pasto",
                             fontSize = 13.5.sp,
                             fontWeight = FontWeight.Bold,
-                            color = NutriTextPrimary
+                            color = ApexTextPrimary
                         )
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
+
+                    FoodSearchSection(
+                        repository = actualFoodRepo,
+                        onIngredientSelected = { ing ->
+                            ingredients.add(
+                                EditableFoodItem(
+                                    name = ing.name,
+                                    quantity = ing.quantity,
+                                    calories = ing.calories.toString(),
+                                    protein = ing.protein.toString(),
+                                    carbs = ing.carbs.toString(),
+                                    fat = ing.fat.toString()
+                                )
+                            )
+                            recalculateTotals()
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "Oppure inserimento manuale o stima AI:",
+                        fontSize = 11.5.sp,
+                        color = ApexTextSecondary,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -417,11 +476,11 @@ fun LoggedMealDetailSheet(
                         OutlinedTextField(
                             value = newFoodName,
                             onValueChange = { newFoodName = it },
-                            placeholder = { Text("Nome cibo (es. Frutta, Pane)", fontSize = 12.sp) },
+                            placeholder = { Text("Nome cibo (es. Frutta, Pane)", fontSize = 12.sp, color = ApexTextMuted) },
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 13.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 13.sp),
                             modifier = Modifier
                                 .weight(1.3f)
                                 .testTag("logged_add_food_name_input")
@@ -430,11 +489,11 @@ fun LoggedMealDetailSheet(
                         OutlinedTextField(
                             value = newFoodQuantity,
                             onValueChange = { newFoodQuantity = it },
-                            placeholder = { Text("Quantità (es. 100g)", fontSize = 12.sp) },
+                            placeholder = { Text("Quantità (es. 100g)", fontSize = 12.sp, color = ApexTextMuted) },
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = NutriTextPrimary, fontSize = 13.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 13.sp),
                             modifier = Modifier
                                 .weight(0.9f)
                                 .testTag("logged_add_food_qty_input")
@@ -483,26 +542,27 @@ fun LoggedMealDetailSheet(
                                     .testTag("logged_estimate_and_add_food_btn"),
                                 shape = RoundedCornerShape(8.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = NutriDark,
-                                    contentColor = Color.White
+                                    containerColor = ApexNeonLime,
+                                    contentColor = ApexBlack
                                 )
                             ) {
                                 if (isEstimatingFood) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(14.dp),
-                                        color = Color.White,
+                                        color = ApexBlack,
                                         strokeWidth = 2.dp
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Stima in corso...", fontSize = 11.5.sp)
+                                    Text("Stima in corso...", fontSize = 11.5.sp, color = ApexBlack)
                                 } else {
                                     Icon(
                                         imageVector = Icons.Default.Add,
                                         contentDescription = null,
+                                        tint = ApexBlack,
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Stima AI & Aggiungi", fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("Stima AI & Aggiungi", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = ApexBlack)
                                 }
                             }
                         }
@@ -531,12 +591,15 @@ fun LoggedMealDetailSheet(
                                 .weight(0.9f)
                                 .height(38.dp)
                                 .testTag("logged_quick_add_food_btn"),
-                            shape = RoundedCornerShape(8.dp)
+                            shape = RoundedCornerShape(8.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ApexTextPrimary)
                         ) {
                             Text(
                                 text = if (newFoodName.isNotBlank()) "+ Aggiungi" else "+ Riga vuota",
                                 fontSize = 11.5.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                color = ApexTextPrimary
                             )
                         }
                     }
@@ -556,12 +619,12 @@ fun LoggedMealDetailSheet(
                         text = "Singoli Cibi nel Pasto (${ingredients.size})",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     Text(
                         text = "Valori nutrizionali dettagliati di ogni alimento",
                         fontSize = 11.5.sp,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                 }
             }
@@ -581,7 +644,7 @@ fun LoggedMealDetailSheet(
                     Text(
                         text = "Nessun alimento dettagliato. Usa il riquadro sopra per aggiungere cibi a questo pasto!",
                         fontSize = 12.5.sp,
-                        color = NutriTextSecondary,
+                        color = ApexTextMuted,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                 }
@@ -612,16 +675,17 @@ fun LoggedMealDetailSheet(
                 OutlinedButton(
                     onClick = { showDeleteConfirmDialog = true },
                     modifier = Modifier
-                        .weight(0.4f)
+                        .weight(0.35f)
                         .height(48.dp)
                         .testTag("delete_logged_meal_button"),
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFDC2626))
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF7F1D1D)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444))
                 ) {
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,
                         contentDescription = "Elimina",
-                        tint = Color(0xFFDC2626),
+                        tint = Color(0xFFEF4444),
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -664,14 +728,15 @@ fun LoggedMealDetailSheet(
                         .testTag("save_logged_meal_button"),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NutriDark,
-                        contentColor = Color.White
+                        containerColor = ApexNeonLime,
+                        contentColor = ApexBlack
                     )
                 ) {
                     Text(
                         text = "Salva modifiche",
                         fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
+                        fontSize = 14.sp,
+                        color = ApexBlack
                     )
                 }
             }
@@ -727,21 +792,22 @@ fun LoggedMealDetailSheet(
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp)),
-                color = Color.White
+                    .clip(RoundedCornerShape(18.dp)),
+                color = ApexDarkSurface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, ApexBorder)
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
                         text = "Elimina pasto",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
-                        color = NutriTextPrimary
+                        color = ApexTextPrimary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Sei sicuro di voler eliminare questo pasto registrato?",
                         fontSize = 13.5.sp,
-                        color = NutriTextSecondary
+                        color = ApexTextSecondary
                     )
                     Spacer(modifier = Modifier.height(18.dp))
                     Row(
@@ -749,7 +815,7 @@ fun LoggedMealDetailSheet(
                         horizontalArrangement = Arrangement.End
                     ) {
                         TextButton(onClick = { showDeleteConfirmDialog = false }) {
-                            Text("Annulla", color = NutriTextSecondary)
+                            Text("Annulla", color = ApexTextMuted)
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(

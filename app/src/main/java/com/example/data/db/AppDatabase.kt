@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.example.data.dao.NutritionDao
+import com.example.data.entity.CachedFoodEntity
 import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealAlternativeEntity
 import com.example.data.entity.MealSlotEntity
@@ -17,9 +18,10 @@ import com.example.data.entity.ShoppingItemEntity
         MealSlotEntity::class,
         MealAlternativeEntity::class,
         LoggedMealEntity::class,
-        ShoppingItemEntity::class
+        ShoppingItemEntity::class,
+        CachedFoodEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.Info
 import androidx.core.content.ContextCompat
 import com.example.util.CameraUtils
@@ -354,7 +355,8 @@ fun PlanScreen(
                 .fillMaxSize()
                 .background(NutriBgLight)
                 .padding(horizontal = 20.dp)
-                .testTag("plan_screen")
+                .testTag("plan_screen"),
+            contentPadding = PaddingValues(bottom = 120.dp)
         ) {
             item {
                 Spacer(modifier = Modifier.height(14.dp))
@@ -586,7 +588,11 @@ fun PlanScreen(
         activePlan?.let { plan ->
             MealDialog(
                 title = "Nuova alternativa",
+                initialTab = 1,
                 geminiService = viewModel.geminiService,
+                foodDatabaseRepository = viewModel.foodDatabaseRepository,
+                targetSlotName = slot.name,
+                isForPlan = true,
                 onDismiss = { addingToSlot = null },
                 onConfirm = { name, cal, prot, c, f, ings, notes, photoUri ->
                     if (ings.isNotEmpty()) {
@@ -596,7 +602,11 @@ fun PlanScreen(
                             name = name,
                             ingredients = ings,
                             notes = notes,
-                            photoUri = photoUri
+                            photoUri = photoUri,
+                            calories = cal,
+                            protein = prot,
+                            carbs = c,
+                            fat = f
                         )
                     } else {
                         viewModel.addDirectAlternative(
@@ -611,7 +621,29 @@ fun PlanScreen(
                             photoUri = photoUri
                         )
                     }
+                    scope.launch {
+                        snackbarHostState.showSnackbar("Alternativa '$name' aggiunta a ${slot.name}! ✓")
+                    }
                     addingToSlot = null
+                },
+                onConfirmAlsoOutdoor = { name, cal, prot, c, f, ings, notes, photoUri ->
+                    val summary = if (ings.isNotEmpty()) {
+                        ings.joinToString(", ") { "${it.name} ${it.quantity}" }
+                    } else notes
+                    viewModel.logDirectMeal(
+                        name = name,
+                        calories = cal,
+                        protein = prot,
+                        carbs = c,
+                        fat = f,
+                        notes = notes,
+                        photoUri = photoUri,
+                        ingredientsSummary = summary,
+                        ingredientsJson = Ingredient.listToJson(ings)
+                    )
+                    scope.launch {
+                        snackbarHostState.showSnackbar("Pasto registrato anche in Giornata Fuori! ✓")
+                    }
                 }
             )
         }
@@ -641,6 +673,7 @@ fun PlanScreen(
             currentSlot = slotOfAlt,
             allSlots = slots,
             geminiService = viewModel.geminiService,
+            foodDatabaseRepository = viewModel.foodDatabaseRepository,
             activePlan = activePlan,
             onDismiss = { selectedAlternativeForDetail = null },
             onSave = { updated ->
@@ -702,6 +735,8 @@ fun PlanScreen(
                 var totalAdded = 0
                 results.forEach { slotGroup ->
                     val matchedSlot = slots.find { it.id == slotGroup.slotId }
+                        ?: slots.find { it.name.equals(slotGroup.slotName, ignoreCase = true) }
+                        ?: slots.firstOrNull()
                     if (matchedSlot != null) {
                         slotGroup.alternatives.forEach { alt ->
                             viewModel.addDirectAlternative(
@@ -1219,6 +1254,9 @@ private fun EditSlotDialog(
     val fatDiff = totalFatPreview - plan.fatTarget
 
     val hasMismatch = calDiff != 0 || protDiff != 0 || carbsDiff != 0 || fatDiff != 0
+    val atwaterSlotKcal = currentSlotProt * 4 + currentSlotCarbs * 4 + currentSlotFat * 9
+    val hasAtwaterMismatch = currentSlotCal > 0 && currentSlotProt > 0 && currentSlotCarbs > 0 &&
+            kotlin.math.abs(atwaterSlotKcal - currentSlotCal) > (currentSlotCal * 0.10).coerceAtLeast(30.0)
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1307,7 +1345,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_calories_input")
@@ -1329,7 +1367,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_protein_input")
@@ -1359,7 +1397,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_carbs_input")
@@ -1381,7 +1419,7 @@ private fun EditSlotDialog(
                             singleLine = true,
                             shape = RoundedCornerShape(10.dp),
                             colors = nutriTextFieldColors(),
-                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 14.sp),
+                            textStyle = TextStyle(color = ApexTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("edit_slot_fat_input")
@@ -1448,6 +1486,65 @@ private fun EditSlotDialog(
                                 fontSize = 11.5.sp,
                                 color = ApexGreen
                             )
+                        }
+                    }
+                }
+
+                if (hasAtwaterMismatch) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF261E0F))
+                            .border(1.dp, Color(0xFFF59E0B), RoundedCornerShape(10.dp))
+                            .padding(10.dp)
+                    ) {
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = Color(0xFFF59E0B),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Formula Atwater per questo pasto",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFF59E0B)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "I macro di questo pasto sommano a $atwaterSlotKcal kcal (P*4 + C*4 + G*9) anziché $currentSlotCal kcal.",
+                                fontSize = 11.sp,
+                                color = ApexTextPrimary,
+                                lineHeight = 15.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                Button(
+                                    onClick = { calories = atwaterSlotKcal.toString() },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = ApexNeonLime,
+                                        contentColor = ApexBlack
+                                    ),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text(
+                                        text = "Imposta $atwaterSlotKcal kcal",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ApexBlack
+                                    )
+                                }
+                            }
                         }
                     }
                 }

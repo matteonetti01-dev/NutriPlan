@@ -113,7 +113,8 @@ fun OutdoorDayScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 20.dp)
-                .testTag("outdoor_day_screen")
+                .testTag("outdoor_day_screen"),
+            contentPadding = PaddingValues(bottom = 120.dp)
         ) {
             item {
                 Spacer(modifier = Modifier.height(14.dp))
@@ -284,6 +285,7 @@ fun OutdoorDayScreen(
             meal = meal,
             planSlots = slots,
             geminiService = viewModel.geminiService,
+            foodDatabaseRepository = viewModel.foodDatabaseRepository,
             onDismiss = { selectedMealForDetail = null },
             onSave = { updated ->
                 viewModel.updateLoggedMeal(updated)
@@ -313,7 +315,9 @@ fun OutdoorDayScreen(
     if (showAddMealDialog) {
         MealDialog(
             title = "Aggiungi pasto",
+            initialTab = 0,
             geminiService = viewModel.geminiService,
+            foodDatabaseRepository = viewModel.foodDatabaseRepository,
             onDismiss = { showAddMealDialog = false },
             onConfirm = { name, cal, prot, c, f, ings, notes, photoUri ->
                 val summary = if (ings.isNotEmpty()) {

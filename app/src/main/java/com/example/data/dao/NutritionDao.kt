@@ -132,4 +132,17 @@ interface NutritionDao {
 
     @Query("DELETE FROM shopping_items WHERE planId = :planId AND isChecked = 1")
     suspend fun deleteCheckedShoppingItems(planId: Long)
+
+    // --- Cached Foods (FatSecret & Local DB Cache) ---
+    @Query("SELECT * FROM food_cache WHERE name LIKE '%' || :query || '%' OR brand LIKE '%' || :query || '%' ORDER BY timestamp DESC LIMIT 30")
+    suspend fun searchCachedFoods(query: String): List<com.example.data.entity.CachedFoodEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCachedFood(food: com.example.data.entity.CachedFoodEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCachedFoods(foods: List<com.example.data.entity.CachedFoodEntity>)
+
+    @Query("SELECT * FROM food_cache ORDER BY timestamp DESC LIMIT 30")
+    suspend fun getRecentCachedFoods(): List<com.example.data.entity.CachedFoodEntity>
 }

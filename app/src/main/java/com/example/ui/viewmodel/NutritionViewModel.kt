@@ -9,6 +9,8 @@ import com.example.ai.DishEstimateResult
 import com.example.ai.GeminiNutritionService
 import com.example.ai.LabelScanResult
 import com.example.data.db.AppDatabase
+import com.example.data.entity.ChatMessage
+import com.example.data.entity.GeneratedMealProposal
 import com.example.data.entity.Ingredient
 import com.example.data.entity.LoggedMealEntity
 import com.example.data.entity.MealAlternativeEntity
@@ -35,6 +37,23 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
     private val db = AppDatabase.getDatabase(application)
     private val repository = NutritionRepository(db.nutritionDao())
     val geminiService = GeminiNutritionService(application)
+    val foodDatabaseRepository = com.example.data.repository.FoodDatabaseRepository(application, db.nutritionDao())
+
+    private val prefs = application.getSharedPreferences("apex_nutrition_prefs", android.content.Context.MODE_PRIVATE)
+    private val _hasCompletedOnboarding = MutableStateFlow(
+        prefs.getBoolean("has_completed_onboarding", false)
+    )
+    val hasCompletedOnboarding: StateFlow<Boolean> = _hasCompletedOnboarding.asStateFlow()
+
+    fun completeOnboarding() {
+        prefs.edit().putBoolean("has_completed_onboarding", true).apply()
+        _hasCompletedOnboarding.value = true
+    }
+
+    fun resetOnboarding() {
+        prefs.edit().putBoolean("has_completed_onboarding", false).apply()
+        _hasCompletedOnboarding.value = false
+    }
 
     // Current selected tab: 0=Dashboard, 1=Piano, 2=Giornata fuori, 3=Impostazioni
     private val _currentTab = MutableStateFlow(0)
@@ -224,13 +243,23 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
         name: String,
         ingredients: List<Ingredient>,
         notes: String = "",
-        photoUri: String? = null
+        photoUri: String? = null,
+        calories: Int = 0,
+        protein: Int = 0,
+        carbs: Int = 0,
+        fat: Int = 0
     ) {
         viewModelScope.launch {
-            val totalCal = ingredients.sumOf { it.calories }
-            val totalProt = ingredients.sumOf { it.protein }
-            val totalCarbs = ingredients.sumOf { it.carbs }
-            val totalFat = ingredients.sumOf { it.fat }
+            val ingCal = ingredients.sumOf { it.calories }
+            val ingProt = ingredients.sumOf { it.protein }
+            val ingCarbs = ingredients.sumOf { it.carbs }
+            val ingFat = ingredients.sumOf { it.fat }
+
+            val totalCal = if (ingCal > 0) ingCal else calories
+            val totalProt = if (ingProt > 0 || ingCal > 0) ingProt else protein
+            val totalCarbs = if (ingCarbs > 0 || ingCal > 0) ingCarbs else carbs
+            val totalFat = if (ingFat > 0 || ingCal > 0) ingFat else fat
+
             repository.insertAlternative(
                 MealAlternativeEntity(
                     slotId = slotId,
@@ -526,6 +555,142 @@ class NutritionViewModel(application: Application) : AndroidViewModel(applicatio
                 onComplete?.invoke("Errore durante la generazione della spesa: ${e.message}")
             } finally {
                 _isGeneratingShoppingList.value = false
+            }
+        }
+    }
+
+    // --- Gemini Pantry Chef Chat State & Actions ---
+    private val initialWelcomeMessage = ChatMessage(
+        isUser = false,
+        text = "Ciao! Sono il tuo assistente nutrizionista AI.\n\nDimmi cosa c'è nella tua dispensa o nel frigorifero e per quale pasto vorresti la ricetta (es. 'Ho uova, zucchine e pane, cosa preparo per pranzo?').\n\nCreerò per te il pasto perfetto calibrato al millimetro sui macronutrienti del tuo piano attivo, che potrai aggiungere al Piano o registrare per oggi in Giornata Fuori!"
+    )
+
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(listOf(initialWelcomeMessage))
+    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
+
+    private val _isChatLoading = MutableStateFlow(false)
+    val isChatLoading: StateFlow<Boolean> = _isChatLoading.asStateFlow()
+
+    val quickPantryItems: List<String> = listOf(
+        "Uova", "Albumi", "Pollo", "Riso basmati", "Pasta", "Tonno",
+        "Zucchine", "Pomodorini", "Olio EVO", "Avena", "Yogurt greco",
+        "Pane integrale", "Mela", "Noci", "Salmone", "Bresaola"
+    )
+
+    fun sendChatMessage(text: String) {
+        val clean = text.trim()
+        if (clean.isBlank()) return
+
+        val userMsg = ChatMessage(isUser = true, text = clean)
+        _chatMessages.value = _chatMessages.value + userMsg
+        _isChatLoading.value = true
+
+        viewModelScope.launch {
+            try {
+                val currentPlan = activePlan.value
+                val slots = activePlanSlots.value
+
+                val planContextBuilder = StringBuilder()
+                if (currentPlan != null) {
+                    planContextBuilder.append("PIANO ATTIVO: \"${currentPlan.name}\"\n")
+                    planContextBuilder.append("TARGET GIORNALIERO: ${currentPlan.caloriesTarget} kcal | ${currentPlan.proteinTarget}g Proteine | ${currentPlan.carbsTarget}g Carboidrati | ${currentPlan.fatTarget}g Grassi\n")
+                    if (slots.isNotEmpty()) {
+                        planContextBuilder.append("PASTI PREVISTI NEL PIANO:\n")
+                        val mealsCount = currentPlan.mealsCount.coerceAtLeast(1)
+                        slots.forEach { s ->
+                            val sCal = s.customCalories ?: (currentPlan.caloriesTarget / mealsCount)
+                            val sProt = s.customProtein ?: (currentPlan.proteinTarget / mealsCount)
+                            val sCarb = s.customCarbs ?: (currentPlan.carbsTarget / mealsCount)
+                            val sFat = s.customFat ?: (currentPlan.fatTarget / mealsCount)
+                            planContextBuilder.append("- Slot ${s.orderIndex}: \"${s.name}\" -> Target: $sCal kcal (Prot: ${sProt}g, Carb: ${sCarb}g, Gras: ${sFat}g)\n")
+                        }
+                    }
+                } else {
+                    planContextBuilder.append("Nessun piano attivo al momento. Fai riferimento a un fabbisogno standard bilanciato (circa 500-700 kcal a pasto).\n")
+                }
+
+                val response = geminiService.sendPantryChefMessage(
+                    history = _chatMessages.value,
+                    userMessage = clean,
+                    activePlanContext = planContextBuilder.toString(),
+                    pantryItems = emptyList()
+                )
+
+                val assistantMsg = ChatMessage(
+                    isUser = false,
+                    text = response.replyText,
+                    mealProposal = response.mealProposal
+                )
+                _chatMessages.value = _chatMessages.value + assistantMsg
+            } catch (e: Exception) {
+                Log.e("NutritionViewModel", "Chat error: ${e.message}", e)
+                _chatMessages.value = _chatMessages.value + ChatMessage(
+                    isUser = false,
+                    text = "Mi dispiace, si è verificato un errore durante la generazione della ricetta: ${e.message}"
+                )
+            } finally {
+                _isChatLoading.value = false
+            }
+        }
+    }
+
+    fun clearChat() {
+        _chatMessages.value = listOf(initialWelcomeMessage)
+    }
+
+    fun copyGeneratedMealToSlot(
+        proposal: GeneratedMealProposal,
+        targetSlotId: Long,
+        planId: Long
+    ) {
+        viewModelScope.launch {
+            val ingJson = Ingredient.listToJson(proposal.ingredients)
+            repository.insertAlternative(
+                MealAlternativeEntity(
+                    slotId = targetSlotId,
+                    planId = planId,
+                    name = proposal.name.ifBlank { "Alternativa dalla Dispensa" },
+                    ingredientsJson = ingJson,
+                    totalCalories = proposal.calories,
+                    totalProtein = proposal.protein,
+                    totalCarbs = proposal.carbs,
+                    totalFat = proposal.fat,
+                    notes = proposal.notes
+                )
+            )
+        }
+    }
+
+    fun logGeneratedMealToToday(proposal: GeneratedMealProposal) {
+        viewModelScope.launch {
+            val ingSummary = proposal.ingredients.joinToString(", ") { "${it.name} ${it.quantity}" }
+            val ingJson = Ingredient.listToJson(proposal.ingredients)
+            repository.logMeal(
+                name = proposal.name.ifBlank { "Pasto dalla Dispensa" },
+                calories = proposal.calories,
+                protein = proposal.protein,
+                carbs = proposal.carbs,
+                fat = proposal.fat,
+                notes = proposal.notes,
+                ingredientsSummary = ingSummary,
+                ingredientsJson = ingJson
+            )
+        }
+    }
+
+    fun addGeneratedMealToShoppingList(proposal: GeneratedMealProposal, planId: Long) {
+        viewModelScope.launch {
+            val items = proposal.ingredients.map { ing ->
+                ShoppingItemEntity(
+                    planId = planId,
+                    name = ing.name,
+                    quantity = ing.quantity,
+                    category = "Da Dispensa",
+                    isCustom = true
+                )
+            }
+            if (items.isNotEmpty()) {
+                repository.insertShoppingItems(items)
             }
         }
     }

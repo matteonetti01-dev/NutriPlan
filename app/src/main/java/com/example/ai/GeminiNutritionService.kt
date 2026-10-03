@@ -3,12 +3,21 @@ package com.example.ai
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color as AndroidColor
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
+import com.example.data.entity.ChatMessage
+import com.example.data.entity.GeneratedMealProposal
 import com.example.data.entity.Ingredient
 import com.example.data.entity.MealSlotEntity
+import com.example.data.entity.PantryChefResponse
+import com.example.data.fatsecret.VerifiedFoodDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -18,6 +27,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.nio.charset.Charset
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
@@ -31,6 +42,12 @@ data class DishEstimateResult(
     val fat: Int,
     val followUpQuestion: String? = null,
     val ingredients: List<Ingredient> = emptyList()
+)
+
+data class OutdoorMealChatResult(
+    val replyText: String,
+    val isFinalEstimate: Boolean,
+    val estimate: DishEstimateResult? = null
 )
 
 data class LabelScanResult(
@@ -76,24 +93,140 @@ class GeminiNutritionService(private val context: Context) {
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    private val apiKey: String
-        get() = BuildConfig.GEMINI_API_KEY
+    private val prefs = context.getSharedPreferences("apex_nutrition_prefs", Context.MODE_PRIVATE)
+
+    var customApiKey: String
+        get() = prefs.getString("gemini_custom_api_key", "") ?: ""
+        set(value) = prefs.edit().putString("gemini_custom_api_key", value.trim()).apply()
+
+    var selectedModel: String
+        get() = prefs.getString("gemini_selected_model", "gemini-2.5-flash") ?: "gemini-2.5-flash"
+        set(value) = prefs.edit().putString("gemini_selected_model", value.trim()).apply()
+
+    val apiKey: String
+        get() {
+            val custom = customApiKey
+            return if (custom.isNotBlank()) custom else BuildConfig.GEMINI_API_KEY
+        }
+
+    val isUsingCustomKey: Boolean
+        get() = customApiKey.isNotBlank()
+
+    val candidateModels: List<String>
+        get() {
+            val current = selectedModel
+            val list = mutableListOf(current)
+            val standard = listOf("gemini-2.5-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview")
+            for (m in standard) {
+                if (!list.contains(m)) list.add(m)
+            }
+            return list
+        }
+
+    val supportedModels: List<Pair<String, String>> = listOf(
+        Pair("gemini-2.5-flash", "Gemini 2.5 Flash (Consigliato • Multimodale Veloce)"),
+        Pair("gemini-3.5-flash", "Gemini 3.5 Flash (Analisi Testi & Compiti Complessi)"),
+        Pair("gemini-flash-latest", "Gemini Flash Latest (Sempre aggiornato)"),
+        Pair("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview (Massima Intelligenza)"),
+        Pair("gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash Lite (Ultra Reattivo)")
+    )
+
+    suspend fun testConnection(keyToTest: String = "", modelToTest: String = ""): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val effectiveKey = if (keyToTest.isNotBlank()) keyToTest.trim() else apiKey
+        if (effectiveKey.isBlank() || effectiveKey == "MY_GEMINI_API_KEY") {
+            return@withContext Pair(false, "Nessuna chiave API inserita. Inserisci la tua chiave API Google Gemini da Google AI Studio.")
+        }
+        val effectiveModel = if (modelToTest.isNotBlank()) modelToTest.trim() else selectedModel
+        val startTime = System.currentTimeMillis()
+        val requestJson = JSONObject().apply {
+            val contentsArr = JSONArray().apply {
+                val contentObj = JSONObject().apply {
+                    val partsArr = JSONArray().apply {
+                        put(JSONObject().put("text", "Rispondi solo con: OK"))
+                    }
+                    put("parts", partsArr)
+                }
+                put(contentObj)
+            }
+            put("contents", contentsArr)
+            val genConfig = JSONObject().apply {
+                put("maxOutputTokens", 5)
+            }
+            put("generationConfig", genConfig)
+        }
+        val body = requestJson.toString().toRequestBody("application/json".toMediaType())
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$effectiveModel:generateContent?key=$effectiveKey"
+        val req = Request.Builder().url(url).post(body).build()
+
+        try {
+            client.newCall(req).execute().use { response ->
+                val elapsed = System.currentTimeMillis() - startTime
+                if (response.isSuccessful) {
+                    Pair(true, "Connessione a Google Gemini riuscita! Modello: $effectiveModel attivo • Latenza: ${elapsed}ms")
+                } else {
+                    val errBody = response.body?.string() ?: ""
+                    val errMsg = try {
+                        val obj = JSONObject(errBody)
+                        val errObj = obj.optJSONObject("error")
+                        errObj?.optString("message") ?: "HTTP ${response.code}: ${response.message}"
+                    } catch (_: Exception) {
+                        "HTTP ${response.code}: ${response.message}"
+                    }
+                    Pair(false, "Errore Google Gemini ($errMsg)")
+                }
+            }
+        } catch (e: Exception) {
+            Pair(false, "Impossibile raggiungere i server Google: ${e.localizedMessage ?: "Errore di connessione"}")
+        }
+    }
 
     /**
-     * Estimate macros for a single ingredient (e.g. "pasta", "80g")
+     * Estimate macros for a single ingredient (e.g. "pasta", "80g", "1 mela", "2 uova")
+     * Prioritizes certified verified Italian database, enforces raw weights and Atwater physical consistency.
      */
     suspend fun estimateIngredient(name: String, quantity: String): Ingredient = withContext(Dispatchers.IO) {
         val cleanName = name.trim()
         val cleanQty = quantity.trim()
+        if (cleanName.isBlank()) return@withContext Ingredient(name = "", quantity = cleanQty, calories = 0, protein = 0, carbs = 0, fat = 0)
 
+        val grams = parsePortionGrams(cleanName, cleanQty)
+        val factor = grams / 100.0
+
+        // 1. Highest priority: Check certified Italian Food Database (USDA / CREA verified standards)
+        val verifiedMatch = VerifiedFoodDatabase.findBestMatch(cleanName)
+        if (verifiedMatch != null) {
+            val cal = (verifiedMatch.caloriesPer100g * factor).roundToInt()
+            val prot = (verifiedMatch.proteinPer100g * factor).roundToInt()
+            val carbs = (verifiedMatch.carbsPer100g * factor).roundToInt()
+            val fat = (verifiedMatch.fatPer100g * factor).roundToInt()
+            return@withContext Ingredient(
+                name = cleanName,
+                quantity = if (cleanQty.isBlank()) "${grams.roundToInt()}g" else cleanQty,
+                calories = cal,
+                protein = prot,
+                carbs = carbs,
+                fat = fat
+            )
+        }
+
+        // 2. Second priority: Use Gemini AI with strict thermodynamic Atwater and raw-weight instructions
         if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
             try {
                 val prompt = """
-                    Calcola i valori nutrizionali per questo alimento:
+                    Sei un biologo nutrizionista clinico ed esperto di composizione degli alimenti (CREA/USDA).
+                    Calcola con il massimo rigore scientifico i valori nutrizionali per questo alimento:
                     Alimento: "$cleanName"
-                    Quantità: "$cleanQty"
+                    Quantità indicata: "${if (cleanQty.isBlank()) "${grams.roundToInt()}g" else cleanQty}"
+                    Grammatura stimata della porzione: ${grams.roundToInt()} grammi
                     
-                    Rispondi ESCLUSIVAMENTE con un oggetto JSON valido nel formato:
+                    REGOLE CRITICHE DI CALCOLO E COERENZA NUTRIZIONALE:
+                    1. PESATO A CRUDO: Salvo che l'utente specifichi esplicitamente "cotto", tutti gli alimenti (pasta, riso, cereali, carne, legumi) devono essere calcolati PESATI A CRUDO (es. pasta secca cruda ~350-360 kcal/100g, riso crudo ~350 kcal/100g, petto di pollo crudo ~110-120 kcal/100g).
+                    2. FORMULA ATWATER (LEGGE FISICA): Le calorie TOTALI devono corrispondere ESATTAMENTE alla somma termodinamica dei macronutrienti:
+                       Calorie = (Proteine * 4) + (Carboidrati * 4) + (Grassi * 9).
+                       Non fornire MAI calorie discordanti o inventate rispetto ai macronutrienti.
+                    3. Se l'alimento include grassi o condimenti nascosti (es. fritti o preparati), calcolali fedelmente.
+                    
+                    Rispondi ESCLUSIVAMENTE con un JSON nel formato:
                     {
                       "calories": 280,
                       "protein": 10,
@@ -105,18 +238,29 @@ class GeminiNutritionService(private val context: Context) {
 
                 val jsonResponse = callGeminiText(prompt)
                 if (jsonResponse != null) {
-                    val calories = jsonResponse.optInt("calories", 0)
-                    val protein = jsonResponse.optInt("protein", 0)
-                    val carbs = jsonResponse.optInt("carbs", 0)
-                    val fat = jsonResponse.optInt("fat", 0)
-                    if (calories > 0 || protein > 0 || carbs > 0 || fat > 0) {
+                    val p = jsonResponse.optInt("protein", 0).coerceAtLeast(0)
+                    val c = jsonResponse.optInt("carbs", 0).coerceAtLeast(0)
+                    val f = jsonResponse.optInt("fat", 0).coerceAtLeast(0)
+                    val returnedCal = jsonResponse.optInt("calories", 0)
+                    val atwaterCal = (p * 4 + c * 4 + f * 9)
+
+                    // Reconcile calories to ensure 100% mathematical accuracy
+                    val reconciledCal = if (returnedCal > 0 && Math.abs(returnedCal - atwaterCal) <= (atwaterCal * 0.15).coerceAtLeast(15.0)) {
+                        returnedCal
+                    } else if (atwaterCal > 0) {
+                        atwaterCal
+                    } else {
+                        returnedCal
+                    }
+
+                    if (reconciledCal > 0 || p > 0 || c > 0 || f > 0) {
                         return@withContext Ingredient(
                             name = cleanName,
-                            quantity = cleanQty,
-                            calories = calories,
-                            protein = protein,
-                            carbs = carbs,
-                            fat = fat
+                            quantity = if (cleanQty.isBlank()) "${grams.roundToInt()}g" else cleanQty,
+                            calories = reconciledCal,
+                            protein = p,
+                            carbs = c,
+                            fat = f
                         )
                     }
                 }
@@ -125,7 +269,7 @@ class GeminiNutritionService(private val context: Context) {
             }
         }
 
-        // Reliable fallback database
+        // 3. Fallback database
         return@withContext fallbackEstimateIngredient(cleanName, cleanQty)
     }
 
@@ -141,7 +285,7 @@ class GeminiNutritionService(private val context: Context) {
             try {
                 val base64Image = photoUri?.let { uri -> uriToBase64(uri) }
                 val promptBuilder = StringBuilder()
-                promptBuilder.append("Sei un nutrizionista esperto. Analizza il piatto (dalla foto se presente e dalle note).\n")
+                promptBuilder.append("Sei un biologo nutrizionista clinico esperto in nutrizione sportiva e ristorazione. Analizza il piatto (dalla foto se presente e dalle note dell'utente).\n")
                 promptBuilder.append("Note dell'utente: \"$notes\"\n")
                 if (conversationHistory.isNotEmpty()) {
                     promptBuilder.append("Conversazione precedente:\n")
@@ -150,8 +294,11 @@ class GeminiNutritionService(private val context: Context) {
                     }
                 }
                 promptBuilder.append("""
-                    Fornisci una stima accurata delle calorie e dei macronutrienti (Proteine, Carboidrati, Grassi).
-                    Se le informazioni sono incerte o se l'utente mangia fuori, poni una domanda di follow-up mirata (es. "Sei fuori? Se conosci il nome del locale o il condimento, dimmelo per affinare la stima.") oppure lascia "followUpQuestion" vuoto se la stima è sufficientemente precisa.
+                    REGOLE CRITICHE DI CALCOLO E COERENZA NUTRIZIONALE:
+                    1. FORMULA ATWATER (VINCOLO ASSOLUTO): Le calorie totali del pasto DEVONO corrispondere esattamente alla formula: (Proteine * 4) + (Carboidrati * 4) + (Grassi * 9).
+                    2. COERENZA INGREDIENTI: La somma delle calorie e dei singoli macronutrienti dell'elenco 'ingredients' deve corrispondere con precisione ai totali del pasto (calories, protein, carbs, fat).
+                    3. GRAMMATURE E CONDIMENTI: Considera porzioni reali e i condimenti di cottura (olio EVO, burro, salse) tipici della preparazione descritta (es. 10-15g di olio di cottura per piatti saltati o al ristorante).
+                    4. Se le informazioni sono incerte o se l'utente mangia fuori, poni una domanda di follow-up mirata (es. "Sei fuori? Se conosci il nome del locale o il condimento, dimmelo per affinare la stima.") oppure lascia "followUpQuestion" vuoto se la stima è sufficientemente precisa.
                     
                     Rispondi ESCLUSIVAMENTE con un JSON nel seguente formato:
                     {
@@ -163,7 +310,8 @@ class GeminiNutritionService(private val context: Context) {
                       "followUpQuestion": "Sei al ristorante? Sai che olio hanno usato?",
                       "ingredients": [
                          {"name": "Riso basmati", "quantity": "100g", "calories": 350, "protein": 8, "carbs": 77, "fat": 1},
-                         {"name": "Petto di pollo", "quantity": "150g", "calories": 200, "protein": 40, "carbs": 0, "fat": 3}
+                         {"name": "Petto di pollo", "quantity": "150g", "calories": 165, "protein": 35, "carbs": 0, "fat": 2},
+                         {"name": "Olio EVO", "quantity": "15g", "calories": 135, "protein": 0, "carbs": 0, "fat": 15}
                       ]
                     }
                 """.trimIndent())
@@ -176,10 +324,10 @@ class GeminiNutritionService(private val context: Context) {
 
                 if (jsonResponse != null) {
                     val name = jsonResponse.optString("mealName", if (notes.isNotBlank()) notes else "Pasto stimato")
-                    val calories = jsonResponse.optInt("calories", 500)
-                    val protein = jsonResponse.optInt("protein", 25)
-                    val carbs = jsonResponse.optInt("carbs", 50)
-                    val fat = jsonResponse.optInt("fat", 15)
+                    var calories = jsonResponse.optInt("calories", 500)
+                    var protein = jsonResponse.optInt("protein", 25)
+                    var carbs = jsonResponse.optInt("carbs", 50)
+                    var fat = jsonResponse.optInt("fat", 15)
                     val followUp = jsonResponse.optString("followUpQuestion").takeIf { it.isNotBlank() }
                     val ingArr = jsonResponse.optJSONArray("ingredients")
                     val ingredients = mutableListOf<Ingredient>()
@@ -189,9 +337,18 @@ class GeminiNutritionService(private val context: Context) {
                         }
                     }
 
+                    // Enforce physical Atwater coherence
+                    val atwaterCal = (protein * 4 + carbs * 4 + fat * 9)
+                    val sumIngCal = if (ingredients.isNotEmpty()) ingredients.sumOf { it.calories } else 0
+                    val finalCal = when {
+                        sumIngCal > 0 && Math.abs(sumIngCal - atwaterCal) <= 50 -> sumIngCal
+                        atwaterCal > 0 -> atwaterCal
+                        else -> calories
+                    }
+
                     return@withContext DishEstimateResult(
                         mealName = name,
-                        calories = calories,
+                        calories = finalCal,
                         protein = protein,
                         carbs = carbs,
                         fat = fat,
@@ -255,6 +412,435 @@ class GeminiNutritionService(private val context: Context) {
         )
     }
 
+    data class FileInspectionResult(
+        val isText: Boolean,
+        val textContent: String?,
+        val rawBytes: ByteArray?,
+        val mimeType: String,
+        val fileName: String
+    )
+
+    private fun inspectFile(uri: Uri): FileInspectionResult {
+        var fileName = ""
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx != -1) fileName = cursor.getString(idx) ?: ""
+                }
+            }
+        } catch (_: Exception) {}
+        if (fileName.isBlank()) {
+            fileName = uri.lastPathSegment ?: "documento"
+        }
+        val lowerName = fileName.lowercase()
+        val resolverMime = context.contentResolver.getType(uri)?.lowercase() ?: ""
+
+        val bytes = try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                val buffer = ByteArrayOutputStream()
+                val data = ByteArray(16384)
+                var nRead: Int
+                var totalBytes = 0
+                while (stream.read(data, 0, data.size).also { nRead = it } != -1 && totalBytes < 10 * 1024 * 1024) {
+                    buffer.write(data, 0, nRead)
+                    totalBytes += nRead
+                }
+                buffer.toByteArray()
+            }
+        } catch (e: Exception) {
+            null
+        }
+
+        if (bytes == null || bytes.isEmpty()) {
+            return FileInspectionResult(false, null, null, "application/octet-stream", fileName)
+        }
+
+        val isPdf = (bytes.size >= 4 && bytes[0] == 0x25.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x44.toByte() && bytes[3] == 0x46.toByte()) ||
+                lowerName.endsWith(".pdf") || resolverMime == "application/pdf"
+
+        val isPng = bytes.size >= 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+        val isJpg = bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte()
+        val isWebp = bytes.size >= 12 && String(bytes.sliceArray(0..3)) == "RIFF" && String(bytes.sliceArray(8..11)) == "WEBP"
+        val isImage = isPng || isJpg || isWebp || resolverMime.startsWith("image/") ||
+                lowerName.endsWith(".png") || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".webp")
+
+        if (isPdf) {
+            val extractedPdfText = extractTextFromPdfBytes(bytes)
+            return FileInspectionResult(
+                isText = !extractedPdfText.isNullOrBlank(),
+                textContent = extractedPdfText,
+                rawBytes = bytes,
+                mimeType = "application/pdf",
+                fileName = fileName
+            )
+        }
+
+        if (isImage) {
+            val imgMime = when {
+                isPng || lowerName.endsWith(".png") -> "image/png"
+                isWebp || lowerName.endsWith(".webp") -> "image/webp"
+                else -> "image/jpeg"
+            }
+            return FileInspectionResult(
+                isText = false,
+                textContent = null,
+                rawBytes = bytes,
+                mimeType = imgMime,
+                fileName = fileName
+            )
+        }
+
+        // Try decoding as plain text (UTF-8 or ISO-8859-1)
+        val text = try {
+            String(bytes, Charsets.UTF_8).replace("\u0000", "")
+        } catch (_: Exception) {
+            try {
+                String(bytes, Charset.forName("ISO-8859-1")).replace("\u0000", "")
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        return FileInspectionResult(
+            isText = !text.isNullOrBlank(),
+            textContent = text,
+            rawBytes = bytes,
+            mimeType = if (resolverMime.startsWith("text/")) resolverMime else "text/plain",
+            fileName = fileName
+        )
+    }
+
+    private fun extractTextFromPdfBytes(bytes: ByteArray): String? {
+        val extractedText = StringBuilder()
+
+        try {
+            val raw = String(bytes, Charsets.ISO_8859_1)
+            var searchPos = 0
+
+            while (searchPos < bytes.size) {
+                val sIdx = raw.indexOf("stream", searchPos)
+                if (sIdx == -1) break
+
+                var dataStart = sIdx + 6
+                if (dataStart < bytes.size && bytes[dataStart] == '\r'.toByte()) dataStart++
+                if (dataStart < bytes.size && bytes[dataStart] == '\n'.toByte()) dataStart++
+
+                val eIdx = raw.indexOf("endstream", dataStart)
+                if (eIdx == -1) break
+
+                val dictHeader = raw.substring((sIdx - 300).coerceAtLeast(0), sIdx)
+                val isFlate = dictHeader.contains("/FlateDecode") || dictHeader.contains("/Fl")
+
+                val streamLen = eIdx - dataStart
+                if (streamLen in 1..2_000_000) {
+                    val streamBytes = bytes.copyOfRange(dataStart, eIdx)
+                    val uncompressed = if (isFlate) {
+                        decompressZlib(streamBytes)
+                    } else {
+                        streamBytes
+                    }
+
+                    if (uncompressed != null && uncompressed.isNotEmpty()) {
+                        val streamStr = String(uncompressed, Charsets.ISO_8859_1)
+                        parsePdfTextStream(streamStr, extractedText)
+                    }
+                }
+
+                searchPos = eIdx + 9
+            }
+
+            // Also check for uncompressed text in raw PDF body
+            if (extractedText.length < 50) {
+                parsePdfTextStream(raw, extractedText)
+            }
+        } catch (_: Exception) {}
+
+        val result = extractedText.toString().trim()
+        return if (result.length > 20) result else null
+    }
+
+    private fun decompressZlib(data: ByteArray): ByteArray? {
+        for (nowrap in listOf(false, true)) {
+            val inflater = java.util.zip.Inflater(nowrap)
+            inflater.setInput(data)
+            val outputStream = ByteArrayOutputStream(data.size * 2)
+            val buffer = ByteArray(4096)
+            try {
+                while (!inflater.finished()) {
+                    val count = inflater.inflate(buffer)
+                    if (count == 0) {
+                        if (inflater.needsInput() || inflater.needsDictionary()) break
+                    } else {
+                        outputStream.write(buffer, 0, count)
+                    }
+                }
+                inflater.end()
+                val res = outputStream.toByteArray()
+                if (res.isNotEmpty()) return res
+            } catch (_: Exception) {
+                inflater.end()
+            }
+        }
+        return null
+    }
+
+    private fun parsePdfTextStream(streamStr: String, out: StringBuilder) {
+        val tjMatcher = Pattern.compile("""\((.*?)\)\s*(?:Tj|'|")""").matcher(streamStr)
+        while (tjMatcher.find()) {
+            val text = cleanPdfString(tjMatcher.group(1) ?: "")
+            if (text.isNotBlank()) {
+                out.append(text).append("\n")
+            }
+        }
+
+        val hexTjMatcher = Pattern.compile("""<([0-9A-Fa-f]+)>\s*(?:Tj|'|")""").matcher(streamStr)
+        while (hexTjMatcher.find()) {
+            val hex = hexTjMatcher.group(1) ?: ""
+            val text = decodePdfHexString(hex)
+            if (text.isNotBlank()) {
+                out.append(text).append("\n")
+            }
+        }
+
+        val arrayTjMatcher = Pattern.compile("""\[(.*?)\]\s*TJ""").matcher(streamStr)
+        while (arrayTjMatcher.find()) {
+            val inner = arrayTjMatcher.group(1) ?: ""
+            val tokenMatcher = Pattern.compile("""\((.*?)\)|<([0-9A-Fa-f]+)>""").matcher(inner)
+            val lineBuilder = StringBuilder()
+            while (tokenMatcher.find()) {
+                val literal = tokenMatcher.group(1)
+                val hex = tokenMatcher.group(2)
+                if (literal != null) {
+                    lineBuilder.append(cleanPdfString(literal))
+                } else if (hex != null) {
+                    lineBuilder.append(decodePdfHexString(hex))
+                }
+            }
+            val text = lineBuilder.toString().trim()
+            if (text.isNotBlank()) {
+                out.append(text).append("\n")
+            }
+        }
+    }
+
+    private fun decodePdfHexString(hex: String): String {
+        val clean = hex.replace("\\s".toRegex(), "")
+        if (clean.isEmpty() || clean.length % 2 != 0) return ""
+        val bytes = ByteArray(clean.length / 2)
+        for (i in clean.indices step 2) {
+            val b = clean.substring(i, i + 2).toIntOrNull(16) ?: 0
+            bytes[i / 2] = b.toByte()
+        }
+        if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
+            return try {
+                String(bytes.copyOfRange(2, bytes.size), Charsets.UTF_16BE)
+            } catch (_: Exception) {
+                String(bytes, Charsets.ISO_8859_1)
+            }
+        }
+        if (bytes.size >= 4 && bytes[0] == 0.toByte() && bytes[2] == 0.toByte()) {
+            return try {
+                String(bytes, Charsets.UTF_16BE)
+            } catch (_: Exception) {
+                String(bytes, Charsets.ISO_8859_1)
+            }
+        }
+        return String(bytes, Charsets.ISO_8859_1)
+    }
+
+    private fun cleanPdfString(raw: String): String {
+        return raw.replace("\\(", "(")
+            .replace("\\)", ")")
+            .replace("\\\\", "\\")
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .trim()
+    }
+
+    fun renderPdfToBitmaps(bytes: ByteArray, maxPages: Int = 16): List<Bitmap> {
+        val bitmaps = mutableListOf<Bitmap>()
+        var tempFile: File? = null
+        var pfd: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+        try {
+            tempFile = File.createTempFile("pdf_page_", ".pdf", context.cacheDir)
+            tempFile.writeBytes(bytes)
+            pfd = ParcelFileDescriptor.open(tempFile, ParcelFileDescriptor.MODE_READ_ONLY)
+            renderer = PdfRenderer(pfd)
+            val pageCount = renderer.pageCount.coerceAtMost(maxPages)
+            for (i in 0 until pageCount) {
+                val page = renderer.openPage(i)
+                // High-resolution rasterization (1600px width) ensures small fonts, tables,
+                // alternative columns, grams and notes in clinical diet PDFs are crystal clear.
+                val targetWidth = 1600
+                val scale = targetWidth.toFloat() / page.width.toFloat().coerceAtLeast(1f)
+                val targetHeight = (page.height * scale).toInt().coerceIn(200, 4000)
+                val bmp = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bmp)
+                canvas.drawColor(AndroidColor.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                page.close()
+                bitmaps.add(bmp)
+            }
+        } catch (e: Exception) {
+            Log.e("GeminiService", "Error rendering PDF to bitmaps: ${e.message}")
+        } finally {
+            try { renderer?.close() } catch (_: Exception) {}
+            try { pfd?.close() } catch (_: Exception) {}
+            try { tempFile?.delete() } catch (_: Exception) {}
+        }
+        return bitmaps
+    }
+
+    /**
+     * Extracts alternatives faithfully from raw text (copied or extracted from document).
+     * Strictly avoids hallucinations or inventing meals not in the user's text,
+     * while exhaustively capturing all options, inline variants ("oppure"), and daily menus.
+     */
+    suspend fun extractAlternativesFromText(
+        rawText: String,
+        mealSlotName: String
+    ): List<ImportedAlternative> = withContext(Dispatchers.IO) {
+        val cleanText = rawText.trim()
+        if (cleanText.isBlank()) return@withContext emptyList()
+
+        if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+            try {
+                val prompt = """
+                    Sei un biologo nutrizionista clinico ed esperto in dietetica applicata.
+                    L'utente ti ha fornito il testo reale estratto da un suo file o documento con la sua dieta personale o piano alimentare.
+                    Il tuo obiettivo è analizzare attentamente il testo ed estrarre TUTTE le opzioni o alternative previste per il pasto: "$mealSlotName" (inclusi eventuali sinonimi o varianti correlate, es. Colazione/Breakfast, Pranzo/Lunch, Spuntino/Merenda/Break/Snack, Cena/Dinner).
+
+                    *** OBIETTIVO PRIMARIO ED INDEROGABILE: ZERO PERDITA DI INFORMAZIONI ***:
+                    L'utente richiede espressamente di PRENDERE TUTTO CIÒ CHE È SCRITTO NEL FILE, SENZA PERDERE NULLA.
+                    Nessuna alternativa, variante o alimento presente per questo pasto deve essere tralasciato o scartato!
+
+                    *** REGOLE CRITICHE E IMPERATIVE ***:
+                    1. ZERO ALLUCINAZIONI E MASSIMA FEDELTÀ:
+                       - DEVI PRENDERE ESCLUSIVAMENTE E FEDELMENTE CIÒ CHE L'UTENTE HA SCRITTO NEL TESTO FORNITO.
+                       - È SEVERAMENTE VIETATO INVENTARE pasti, ricette o cibi non presenti nel testo fornito.
+                       - NON SOSTITUIRE con cibi stereotipati se non compaiono nel testo dell'utente!
+
+                    2. PRENDI TUTTE LE ALTERNATIVE, NESSUNA ESCLUSA:
+                       - Estrai ogni opzione numerata o distinta (es. "Alternativa 1", "Alternativa 2", "Opzione A/B/C", "Variante 1/2").
+                       - ALTERNATIVE NEL TESTO ("OPPURE", "IN ALTERNATIVA", "A SCELTA TRA", "/", "O"):
+                         Se all'interno della descrizione sono indicati cibi alternativi (ad es. "150g petto di pollo OPPURE 130g manzo OPPURE 180g pesce", o "pane 50g o 4 fette biscottate o 40g fiocchi d'avena"),
+                         DEVI creare una distinta alternativa per CIASCUNA di queste opzioni, in modo da non perderne nessuna!
+                       - MENU SETTIMANALI O GIORNALIERI (Lunedì... Domenica, o Giorno 1, 2, 3...):
+                         Se il documento presenta menu suddivisi per giorni della settimana, estrai il pasto "$mealSlotName" di CIASCUN GIORNO come un'alternativa separata (es. "$mealSlotName - Lunedì", "$mealSlotName - Martedì", ecc.)!
+                       - TABELLE DI SOSTITUZIONE ED EQUIVALENZE:
+                         Se nel testo compaiono sostituzioni o equivalenze previste per questo pasto, estraile tutte come opzioni alternative.
+
+                    3. INGREDIENTI, QUANTITÀ E MACRONUTRIENTI:
+                       - Per ogni alimento scritto dall'utente, estrai:
+                         * "name": Nome esatto dell'alimento
+                         * "quantity": Quantità indicata (es. "80g", "2 fette", "200ml", "1 cucchiaio", "a piacere")
+                         * "calories", "protein", "carbs", "fat": Calcola i valori nutrizionali precisi per quel cibo e grammatura. Se nel testo sono presenti "Macro stimati", usali con massima fedeltà.
+                       - "name" dell'alternativa: crea un titolo descrittivo basato ESCLUSIVAMENTE sui cibi di quell'alternativa (es. "Alternativa 1: Fette biscottate con marmellata e latte").
+                       - "notes": note o istruzioni scritte dall'utente nel testo.
+
+                    Rispondi ESCLUSIVAMENTE con un JSON nel formato seguente:
+                    {
+                      "alternatives": [
+                        {
+                          "name": "Nome Alternativa (dal testo dell'utente)",
+                          "totalCalories": 420,
+                          "totalProtein": 22,
+                          "totalCarbs": 58,
+                          "totalFat": 10,
+                          "notes": "Note dal testo...",
+                          "ingredients": [
+                            {
+                              "name": "Nome alimento dell'utente",
+                              "quantity": "80g",
+                              "calories": 280,
+                              "protein": 10,
+                              "carbs": 55,
+                              "fat": 2
+                            }
+                          ]
+                        }
+                      ]
+                    }
+
+                    TESTO FORNITO DALL'UTENTE:
+                    \"\"\"
+                    $cleanText
+                    \"\"\"
+                """.trimIndent()
+
+                val jsonResponse = callGeminiText(prompt)
+                val parsed = parseAlternativesFromJson(jsonResponse)
+                if (parsed.isNotEmpty()) return@withContext parsed
+            } catch (e: Exception) {
+                Log.e("GeminiService", "Error in extractAlternativesFromText: ${e.message}", e)
+            }
+        }
+
+        // Smart text fallback: parses only the user's actual text lines (never invents fake food)
+        return@withContext fallbackExtractAlternativesFromText(mealSlotName, cleanText)
+    }
+
+    private fun bitmapToBase64Jpeg(bitmap: Bitmap): String? {
+        return try {
+            val outputStream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+            Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseAlternativesFromJson(jsonResponse: JSONObject?): List<ImportedAlternative> {
+        if (jsonResponse == null || !jsonResponse.has("alternatives")) return emptyList()
+        val arr = jsonResponse.getJSONArray("alternatives")
+        val list = mutableListOf<ImportedAlternative>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val ingArr = obj.optJSONArray("ingredients")
+            val ingList = mutableListOf<Ingredient>()
+            if (ingArr != null) {
+                for (j in 0 until ingArr.length()) {
+                    val ingObj = ingArr.getJSONObject(j)
+                    ingList.add(
+                        Ingredient(
+                            name = ingObj.optString("name", "Alimento"),
+                            quantity = ingObj.optString("quantity", "100g"),
+                            calories = ingObj.optInt("calories", 0),
+                            protein = ingObj.optInt("protein", 0),
+                            carbs = ingObj.optInt("carbs", 0),
+                            fat = ingObj.optInt("fat", 0)
+                        )
+                    )
+                }
+            }
+
+            val cal = obj.optInt("totalCalories", ingList.sumOf { it.calories })
+            val prot = obj.optInt("totalProtein", ingList.sumOf { it.protein })
+            val carbs = obj.optInt("totalCarbs", ingList.sumOf { it.carbs })
+            val fat = obj.optInt("totalFat", ingList.sumOf { it.fat })
+            val name = obj.optString("name", "Alternativa ${i + 1}")
+            val notes = obj.optString("notes", "")
+
+            if (ingList.isNotEmpty() || cal > 0) {
+                list.add(
+                    ImportedAlternative(
+                        name = name,
+                        totalCalories = cal,
+                        totalProtein = prot,
+                        totalCarbs = carbs,
+                        totalFat = fat,
+                        notes = notes,
+                        ingredients = ingList
+                    )
+                )
+            }
+        }
+        return list
+    }
+
     /**
      * Scans a document (PDF, Text file, Image, etc.) for a specific meal slot,
      * extracts all alternatives found with their ingredients and macronutrients.
@@ -263,134 +849,225 @@ class GeminiNutritionService(private val context: Context) {
         uri: Uri,
         mealSlotName: String
     ): List<ImportedAlternative> = withContext(Dispatchers.IO) {
-        val detectedMime = context.contentResolver.getType(uri)?.lowercase() ?: when {
-            uri.path?.endsWith(".pdf", ignoreCase = true) == true -> "application/pdf"
-            uri.path?.endsWith(".txt", ignoreCase = true) == true -> "text/plain"
-            uri.path?.endsWith(".csv", ignoreCase = true) == true -> "text/csv"
-            uri.path?.endsWith(".json", ignoreCase = true) == true -> "application/json"
-            uri.path?.endsWith(".png", ignoreCase = true) == true -> "image/png"
-            uri.path?.endsWith(".jpg", ignoreCase = true) == true || uri.path?.endsWith(".jpeg", ignoreCase = true) == true -> "image/jpeg"
-            uri.path?.endsWith(".webp", ignoreCase = true) == true -> "image/webp"
-            else -> "application/pdf"
-        }
+        val inspection = inspectFile(uri)
 
-        // Check if file is readable as UTF-8 text (e.g. .txt, .csv, .md, .json)
-        val textContent: String? = if (detectedMime.startsWith("text/") ||
-            uri.path?.let { p -> p.endsWith(".txt") || p.endsWith(".csv") || p.endsWith(".md") || p.endsWith(".json") } == true
-        ) {
-            try {
-                context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-            } catch (e: Exception) {
-                null
-            }
-        } else {
-            null
-        }
+        val prompt = """
+            Sei un biologo nutrizionista clinico ed esperto in dietetica applicata.
+            L'utente ha fornito un documento PDF o immagine con la sua dieta personale o piano alimentare clinico.
+            Il tuo obiettivo è analizzare attentamente il file ed estrarre TUTTE le opzioni o alternative previste per il pasto: "$mealSlotName" (inclusi eventuali sinonimi o varianti correlate, es. Colazione/Breakfast, Pranzo/Lunch, Spuntino/Merenda/Break/Snack, Cena/Dinner).
 
-        if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
-            try {
-                val prompt = """
-                    Sei un biologo nutrizionista e preparatore atletico esperto.
-                    L'utente ha fornito un documento salvato contenente un piano nutrizionale o delle alternative/opzioni alimentari.
-                    Il tuo obiettivo è analizzare attentamente il file ed estrarre TUTTE le opzioni o alternative salvate specificamente per il pasto: "$mealSlotName".
-                    
-                    Linee guida per l'estrazione:
-                    1. Cerca nel documento tutte le varianti, alternative (es. "Alternativa 1", "Alternativa 2", "Opzione A", "Opzione B", o combinazioni diverse di ingredienti) previste per il pasto "$mealSlotName" (oppure per la tipologia di pasto corrispondente, es. Colazione, Spuntino, Pranzo, Merenda, Cena).
-                    2. Se il documento descrive un singolo pasto o un elenco di alimenti per questo pasto, estrailo come un'alternativa con il suo nome descrittivo.
-                    3. Se il documento descrive più alternative distinte (es. 2, 3, 4 o più opzioni di colazione/pranzo/ecc.), estrai CIASCUNA alternativa separatamente.
-                    4. Per ogni alternativa, estrai:
-                       - "name": Nome chiaro e sintetico (es. "Alternativa 1: Pancake d'avena con yogurt", "Riso basmati e pollo", ecc.)
-                       - "totalCalories": Calorie totali (kcal)
-                       - "totalProtein": Proteine totali in grammi
-                       - "totalCarbs": Carboidrati totali in grammi
-                       - "totalFat": Grassi totali in grammi
-                       - "notes": Eventuali indicazioni di preparazione, varianti o note scritte nel documento
-                       - "ingredients": Lista dettagliata di ciascun alimento con "name", "quantity" (es. "80g", "2 uova", "150ml"), "calories", "protein", "carbs", "fat".
-                    5. Se i macro o le calorie non sono scritti espressamente accanto al cibo, calcolali o stimali accuratamente in base alle grammature standard.
-                    
-                    Rispondi ESCLUSIVAMENTE con un JSON nel formato seguente:
+            *** OBIETTIVO PRIMARIO ED INDEROGABILE: ZERO PERDITA DI INFORMAZIONI ***:
+            L'utente richiede espressamente di PRENDERE TUTTO CIÒ CHE È SCRITTO NEL FILE, SENZA PERDERE NULLA.
+            Nessuna alternativa, variante o alimento presente per questo pasto deve essere tralasciato o scartato!
+
+            *** REGOLE CRITICHE E IMPERATIVE ***:
+            1. ZERO ALLUCINAZIONI E MASSIMA FEDELTÀ:
+               - DEVI PRENDERE ESCLUSIVAMENTE E FEDELMENTE CIÒ CHE È SCRITTO NEL DOCUMENTO FORNITO.
+               - È SEVERAMENTE VIETATO INVENTARE pasti, alimenti o ricette non presenti nel documento.
+               - NON SOSTITUIRE con cibi stereotipati se non compaiono nel file!
+
+            2. PRENDI TUTTE LE ALTERNATIVE, NESSUNA ESCLUSA:
+               - Estrai ogni opzione numerata o distinta (es. "Alternativa 1", "Alternativa 2", "Opzione A/B/C", "Variante 1/2").
+               - ALTERNATIVE NEL TESTO ("OPPURE", "IN ALTERNATIVA", "A SCELTA TRA", "/", "O"):
+                 Se all'interno della descrizione sono indicati cibi alternativi (ad es. "150g petto di pollo OPPURE 130g manzo OPPURE 180g pesce", o "pane 50g o 4 fette biscottate o 40g fiocchi d'avena"),
+                 DEVI creare una distinta alternativa per CIASCUNA di queste opzioni, in modo da non perderne nessuna!
+               - MENU SETTIMANALI O GIORNALIERI (Lunedì... Domenica, o Giorno 1, 2, 3...):
+                 Se il documento presenta menu suddivisi per giorni della settimana, estrai il pasto "$mealSlotName" di CIASCUN GIORNO come un'alternativa separata (es. "$mealSlotName - Lunedì", "$mealSlotName - Martedì", ecc.)!
+               - TABELLE DI SOSTITUZIONE ED EQUIVALENZE:
+                 Se nel documento compaiono tabelle o elenchi di sostituzioni o equivalenze previste per questo pasto, estraile tutte come opzioni alternative.
+
+            3. INGREDIENTI, QUANTITÀ E MACRONUTRIENTI:
+               - Per ciascun alimento scritto nel documento, estrai "name", "quantity", "calories", "protein", "carbs", "fat".
+               - Se nel testo sono presenti "Macro stimati", estraili con massima fedeltà. Altrimenti calcola con cura i macro per quegli alimenti e quella grammatura.
+               - "name" dell'alternativa: crea un titolo descrittivo basato ESCLUSIVAMENTE sui cibi di quell'alternativa.
+
+            Rispondi ESCLUSIVAMENTE con un JSON nel formato:
+            {
+              "alternatives": [
+                {
+                  "name": "Nome Alternativa (dal file, es. Opzione 1 o Lunedì)",
+                  "totalCalories": 420,
+                  "totalProtein": 25,
+                  "totalCarbs": 55,
+                  "totalFat": 10,
+                  "notes": "Note dal documento",
+                  "ingredients": [
                     {
-                      "alternatives": [
-                        {
-                          "name": "Nome Alternativa",
-                          "totalCalories": 450,
-                          "totalProtein": 32,
-                          "totalCarbs": 50,
-                          "totalFat": 12,
-                          "notes": "Note dal file...",
-                          "ingredients": [
-                            {
-                              "name": "Nome alimento",
-                              "quantity": "100g",
-                              "calories": 250,
-                              "protein": 18,
-                              "carbs": 30,
-                              "fat": 5
-                            }
-                          ]
-                        }
-                      ]
+                      "name": "Nome alimento dal file",
+                      "quantity": "80g",
+                      "calories": 280,
+                      "protein": 10,
+                      "carbs": 55,
+                      "fat": 2
                     }
-                """.trimIndent()
-
-                val jsonResponse: JSONObject? = if (textContent != null && textContent.isNotBlank()) {
-                    val textPrompt = "$prompt\n\nCONTENUTO DEL FILE TESTUALE:\n$textContent"
-                    callGeminiText(textPrompt)
-                } else {
-                    // Lettura file binario (PDF o Immagine)
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { stream ->
-                        val buffer = ByteArrayOutputStream()
-                        val data = ByteArray(16384)
-                        var nRead: Int
-                        var totalBytes = 0
-                        // Limite di sicurezza 8MB per inlineData
-                        while (stream.read(data, 0, data.size).also { nRead = it } != -1 && totalBytes < 8 * 1024 * 1024) {
-                            buffer.write(data, 0, nRead)
-                            totalBytes += nRead
-                        }
-                        buffer.toByteArray()
-                    }
-
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                        val effectiveMime = if (detectedMime.startsWith("image/")) detectedMime else "application/pdf"
-                        callGeminiMultimodal(prompt, base64Data, effectiveMime)
-                    } else {
-                        null
-                    }
+                  ]
                 }
+              ]
+            }
+        """.trimIndent()
 
-                if (jsonResponse != null && jsonResponse.has("alternatives")) {
-                    val arr = jsonResponse.getJSONArray("alternatives")
-                    val list = mutableListOf<ImportedAlternative>()
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        val ingArr = obj.optJSONArray("ingredients")
-                        val ingList = mutableListOf<Ingredient>()
-                        if (ingArr != null) {
-                            for (j in 0 until ingArr.length()) {
-                                val ingObj = ingArr.getJSONObject(j)
-                                ingList.add(
-                                    Ingredient(
-                                        name = ingObj.optString("name", "Alimento"),
-                                        quantity = ingObj.optString("quantity", "100g"),
-                                        calories = ingObj.optInt("calories", 0),
-                                        protein = ingObj.optInt("protein", 0),
-                                        carbs = ingObj.optInt("carbs", 0),
-                                        fat = ingObj.optInt("fat", 0)
-                                    )
+        // 1. If PDF: render pages to high-res images for multimodal vision OCR
+        if (inspection.mimeType == "application/pdf" && inspection.rawBytes != null && inspection.rawBytes.isNotEmpty()) {
+            val pdfBitmaps = renderPdfToBitmaps(inspection.rawBytes)
+            val pagesBase64 = pdfBitmaps.mapNotNull { bitmapToBase64Jpeg(it) }
+            if (pagesBase64.isNotEmpty() && apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+                try {
+                    val fullPrompt = if (!inspection.textContent.isNullOrBlank()) {
+                        "$prompt\n\nTESTO RILEVATO NEL DOCUMENTO (usalo come supporto integrativo insieme a TUTTE le pagine visive fornite):\n\"\"\"\n${inspection.textContent}\n\"\"\"\n\nRICORDA: Esamina con cura TUTTE le pagine fornite nelle immagini per non tralasciare alcuna opzione o alternativa!"
+                    } else {
+                        prompt
+                    }
+                    val jsonResponse = callGeminiMultimodalPages(fullPrompt, pagesBase64)
+                    val parsed = parseAlternativesFromJson(jsonResponse)
+                    if (parsed.isNotEmpty()) return@withContext parsed
+                } catch (e: Exception) {
+                    Log.e("GeminiService", "Error in PDF multimodal alternative extraction: ${e.message}")
+                }
+            }
+
+            // Fallback to text extraction if PDF text was decoded
+            if (!inspection.textContent.isNullOrBlank()) {
+                val fromText = extractAlternativesFromText(inspection.textContent, mealSlotName)
+                if (fromText.isNotEmpty()) return@withContext fromText
+            }
+        }
+
+        // 2. If Image (PNG/JPEG/WEBP)
+        if (inspection.mimeType.startsWith("image/") && inspection.rawBytes != null && inspection.rawBytes.isNotEmpty()) {
+            if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+                try {
+                    val base64Data = Base64.encodeToString(inspection.rawBytes, Base64.NO_WRAP)
+                    val jsonResponse = callGeminiMultimodal(prompt, base64Data, inspection.mimeType)
+                    val parsed = parseAlternativesFromJson(jsonResponse)
+                    if (parsed.isNotEmpty()) return@withContext parsed
+                } catch (e: Exception) {
+                    Log.e("GeminiService", "Error in Image multimodal alternative extraction: ${e.message}")
+                }
+            }
+        }
+
+        // 3. Plain text file or decoded text
+        if (inspection.isText && !inspection.textContent.isNullOrBlank()) {
+            return@withContext extractAlternativesFromText(inspection.textContent, mealSlotName)
+        }
+
+        // 4. Local text fallback
+        if (!inspection.textContent.isNullOrBlank()) {
+            return@withContext fallbackExtractAlternativesFromText(mealSlotName, inspection.textContent)
+        }
+
+        return@withContext emptyList()
+    }
+
+    /**
+     * Matches an extracted slot ID or slot name to the most appropriate existing slot in availableSlots.
+     * Guarantees that NO slot or alternative is ever discarded.
+     */
+    private fun matchSlotForExtracted(
+        slotId: Long,
+        slotName: String,
+        availableSlots: List<MealSlotEntity>,
+        index: Int
+    ): MealSlotEntity {
+        // 1. Direct ID match
+        availableSlots.find { it.id == slotId }?.let { return it }
+
+        // 2. Exact name match (case-insensitive)
+        val cleanName = slotName.trim()
+        availableSlots.find { it.name.equals(cleanName, ignoreCase = true) }?.let { return it }
+
+        // 3. Normalized semantic match based on keywords
+        val lower = cleanName.lowercase()
+        if (lower.contains("colazion") || lower.contains("breakfast") || lower.contains("mattina")) {
+            availableSlots.find { it.name.lowercase().contains("colazion") }?.let { return it }
+        }
+        if (lower.contains("pranz") || lower.contains("lunch") || lower.contains("mezzogiorno")) {
+            availableSlots.find { it.name.lowercase().contains("pranz") }?.let { return it }
+        }
+        if (lower.contains("cen") || lower.contains("dinner") || lower.contains("sera")) {
+            availableSlots.find { it.name.lowercase().contains("cen") }?.let { return it }
+        }
+        if (lower.contains("spuntin") || lower.contains("merend") || lower.contains("snack") ||
+            lower.contains("break") || lower.contains("pre nanna") || lower.contains("prenanna")
+        ) {
+            if (lower.contains("1") || lower.contains("mattin")) {
+                availableSlots.find { it.name.lowercase().contains("spuntin 1") || it.name.lowercase().contains("mattin") }?.let { return it }
+            }
+            if (lower.contains("2") || lower.contains("pomerigg") || lower.contains("merend")) {
+                availableSlots.find { it.name.lowercase().contains("spuntin 2") || it.name.lowercase().contains("pomerigg") || it.name.lowercase().contains("merend") }?.let { return it }
+            }
+            availableSlots.find { it.name.lowercase().contains("spuntin") || it.name.lowercase().contains("merend") }?.let { return it }
+        }
+
+        // 4. Match by orderIndex
+        availableSlots.find { it.orderIndex == index + 1 }?.let { return it }
+
+        // 5. Index within bounds
+        if (index in availableSlots.indices) {
+            return availableSlots[index]
+        }
+
+        // 6. Guarantee: NEVER drop! Fallback to the closest slot
+        return availableSlots.last()
+    }
+
+    private fun parseSlotsFromJson(jsonResponse: JSONObject?, availableSlots: List<MealSlotEntity>): List<ImportedSlotWithAlternatives> {
+        if (jsonResponse == null || !jsonResponse.has("slots") || availableSlots.isEmpty()) return emptyList()
+        val slotsArr = jsonResponse.getJSONArray("slots")
+
+        // Group alternatives by target slot ID so multiple sections, pages, daily variants,
+        // and sub-meals are combined cleanly into the appropriate slot without losing anything!
+        val groupedAlternatives = mutableMapOf<Long, MutableList<ImportedAlternative>>()
+        for (slot in availableSlots) {
+            groupedAlternatives[slot.id] = mutableListOf()
+        }
+
+        for (i in 0 until slotsArr.length()) {
+            val slotObj = slotsArr.getJSONObject(i)
+            val targetSlotId = slotObj.optLong("slotId", -1L)
+            val extractedSlotName = slotObj.optString("slotName", "").trim()
+            val matchedSlot = matchSlotForExtracted(targetSlotId, extractedSlotName, availableSlots, i)
+
+            val altArr = slotObj.optJSONArray("alternatives")
+            if (altArr != null) {
+                for (j in 0 until altArr.length()) {
+                    val obj = altArr.getJSONObject(j)
+                    val ingArr = obj.optJSONArray("ingredients")
+                    val ingList = mutableListOf<Ingredient>()
+                    if (ingArr != null) {
+                        for (k in 0 until ingArr.length()) {
+                            val ingObj = ingArr.getJSONObject(k)
+                            ingList.add(
+                                Ingredient(
+                                    name = ingObj.optString("name", "Alimento"),
+                                    quantity = ingObj.optString("quantity", "100g"),
+                                    calories = ingObj.optInt("calories", 0),
+                                    protein = ingObj.optInt("protein", 0),
+                                    carbs = ingObj.optInt("carbs", 0),
+                                    fat = ingObj.optInt("fat", 0)
                                 )
-                            }
+                            )
                         }
+                    }
 
-                        val cal = obj.optInt("totalCalories", ingList.sumOf { it.calories })
-                        val prot = obj.optInt("totalProtein", ingList.sumOf { it.protein })
-                        val carbs = obj.optInt("totalCarbs", ingList.sumOf { it.carbs })
-                        val fat = obj.optInt("totalFat", ingList.sumOf { it.fat })
-                        val name = obj.optString("name", "Alternativa ${i + 1} (da documento)")
-                        val notes = obj.optString("notes", "")
+                    val cal = obj.optInt("totalCalories", ingList.sumOf { it.calories })
+                    val prot = obj.optInt("totalProtein", ingList.sumOf { it.protein })
+                    val carbs = obj.optInt("totalCarbs", ingList.sumOf { it.carbs })
+                    val fat = obj.optInt("totalFat", ingList.sumOf { it.fat })
+                    var name = obj.optString("name", "Alternativa ${j + 1}").trim()
+                    val notes = obj.optString("notes", "")
 
-                        list.add(
+                    // If the extracted meal had a specific name (e.g. "Merenda" or "Spuntino Mattina")
+                    // and the matched slot has a more generic name, preserve that context in the title
+                    if (extractedSlotName.isNotBlank() &&
+                        !matchedSlot.name.equals(extractedSlotName, ignoreCase = true) &&
+                        !name.contains(extractedSlotName, ignoreCase = true)
+                    ) {
+                        name = "[$extractedSlotName] $name"
+                    }
+
+                    if (ingList.isNotEmpty() || cal > 0) {
+                        groupedAlternatives[matchedSlot.id]?.add(
                             ImportedAlternative(
                                 name = name,
                                 totalCalories = cal,
@@ -402,215 +1079,127 @@ class GeminiNutritionService(private val context: Context) {
                             )
                         )
                     }
-
-                    if (list.isNotEmpty()) {
-                        return@withContext list
-                    }
                 }
-            } catch (e: Exception) {
-                Log.e("GeminiService", "Error extracting alternatives from document: ${e.message}", e)
             }
         }
 
-        // Fallback affidabile se offline o se la chiamata non ha restituito alternative
-        return@withContext fallbackExtractAlternatives(mealSlotName, textContent)
+        val result = mutableListOf<ImportedSlotWithAlternatives>()
+        for (slot in availableSlots.sortedBy { it.orderIndex }) {
+            val alts = groupedAlternatives[slot.id] ?: emptyList()
+            if (alts.isNotEmpty()) {
+                result.add(
+                    ImportedSlotWithAlternatives(
+                        slotId = slot.id,
+                        slotOrderIndex = slot.orderIndex,
+                        slotName = slot.name,
+                        alternatives = alts
+                    )
+                )
+            }
+        }
+        return result
     }
 
-    private fun fallbackExtractAlternatives(
-        mealSlotName: String,
-        textContent: String?
-    ): List<ImportedAlternative> {
-        val lowerSlot = mealSlotName.lowercase()
+    /**
+     * Extracts full-plan alternatives faithfully from raw text (copied or extracted from document).
+     * Strictly avoids hallucinations or inventing meals not in the user's text.
+     */
+    suspend fun extractAllPlanAlternativesFromText(
+        rawText: String,
+        availableSlots: List<MealSlotEntity>
+    ): List<ImportedSlotWithAlternatives> = withContext(Dispatchers.IO) {
+        val cleanText = rawText.trim()
+        if (cleanText.isBlank() || availableSlots.isEmpty()) return@withContext emptyList()
 
-        // Se abbiamo del testo, proviamo a dividerlo per paragrafi o righe con alternative
-        if (!textContent.isNullOrBlank()) {
-            val lines = textContent.lines().filter { it.isNotBlank() }
-            val foundAlternatives = mutableListOf<ImportedAlternative>()
+        val slotsDescription = availableSlots.joinToString("\n") {
+            "- Slot ID: ${it.id} (Pasto ${it.orderIndex}): '${it.name}'"
+        }
 
-            var currentTitle = ""
-            val currentIngredients = mutableListOf<Ingredient>()
+        if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+            try {
+                val prompt = """
+                    Sei un biologo nutrizionista clinico ed esperto in dietetica applicata.
+                    L'utente ti ha fornito il testo reale estratto da un suo file o documento contenente la sua intera dieta / piano nutrizionale.
+                    Nel piano attivo dell'applicazione sono configurati i seguenti pasti dell'utente:
+                    $slotsDescription
 
-            for (line in lines) {
-                val trimmed = line.trim()
-                val isAltHeader = trimmed.startsWith("alternativa", ignoreCase = true) ||
-                    trimmed.startsWith("opzione", ignoreCase = true) ||
-                    trimmed.startsWith("variante", ignoreCase = true) ||
-                    trimmed.startsWith("menu", ignoreCase = true)
+                    *** OBIETTIVO PRIMARIO ED INDEROGABILE: ZERO PERDITA DI INFORMAZIONI ***:
+                    L'utente richiede espressamente di PRENDERE TUTTO CIÒ CHE È SCRITTO NEL FILE, SENZA PERDERE NULLA.
+                    Nessuna alternativa, variante o alimento presente nel testo deve essere tralasciato o scartato!
 
-                if (isAltHeader && currentIngredients.isNotEmpty()) {
-                    val totCal = currentIngredients.sumOf { it.calories }.coerceAtLeast(250)
-                    val totProt = currentIngredients.sumOf { it.protein }.coerceAtLeast(15)
-                    val totCarbs = currentIngredients.sumOf { it.carbs }.coerceAtLeast(20)
-                    val totFat = currentIngredients.sumOf { it.fat }.coerceAtLeast(5)
-                    foundAlternatives.add(
-                        ImportedAlternative(
-                            name = if (currentTitle.isNotBlank()) currentTitle else "Alternativa ${foundAlternatives.size + 1}",
-                            totalCalories = totCal,
-                            totalProtein = totProt,
-                            totalCarbs = totCarbs,
-                            totalFat = totFat,
-                            notes = "Importata da file testuale",
-                            ingredients = ArrayList(currentIngredients)
-                        )
-                    )
-                    currentIngredients.clear()
-                    currentTitle = trimmed
-                } else if (isAltHeader) {
-                    currentTitle = trimmed
-                } else {
-                    // Tratta la riga come ingrediente
-                    val cleanFood = trimmed.removePrefix("-").removePrefix("•").removePrefix("*").trim()
-                    if (cleanFood.length > 2) {
-                        val est = fallbackEstimateIngredient(cleanFood, "100g")
-                        currentIngredients.add(est)
+                    *** REGOLE CRITICHE E IMPERATIVE ***:
+                    1. ZERO ALLUCINAZIONI E MASSIMA FEDELTÀ:
+                       - DEVI PRENDERE ESCLUSIVAMENTE E FEDELMENTE QUELLO CHE L'UTENTE HA SCRITTO NEL SUO FILE.
+                       - È SEVERAMENTE VIETATO INVENTARE pasti, cibi o alternative che l'utente non ha scritto nel testo.
+                       - NON SOSTITUIRE gli ingredienti con cibi stereotipati se non compaiono nel testo dell'utente!
+
+                    2. PRENDI TUTTE LE ALTERNATIVE, NESSUNA ESCLUSA:
+                       - ALTERNATIVE NUMERATE O DISTINTE: Estrai ogni opzione ("Alternativa 1", "Alternativa 2", "Opzione A/B/C", "Variante 1/2", "Menu 1/2").
+                       - ALTERNATIVE NEL TESTO ("OPPURE", "IN ALTERNATIVA", "A SCELTA TRA", "/", "O"):
+                         Se all'interno di un pasto sono elencati cibi o abbinamenti alternativi (ad es. "150g petto di pollo OPPURE 130g manzo OPPURE 180g merluzzo" oppure "pane 50g o 4 fette biscottate o 40g fiocchi d'avena"),
+                         DEVI creare una distinta alternativa per CIASCUNA di queste opzioni, in modo da non perderne nessuna!
+                       - MENU SETTIMANALI O GIORNALIERI (Lunedì... Domenica, o Giorno 1, 2, 3...):
+                         Se il testo presenta pasti suddivisi per giorni della settimana o menu rotazionali, estrai il pasto di CIASCUN GIORNO come un'alternativa per quel rispettivo pasto (es. "Colazione - Lunedì", "Colazione - Martedì", ecc.).
+                         NON limitarti a un solo giorno: estrai TUTTI i giorni presenti!
+                       - TABELLE DI SOSTITUZIONE ED EQUIVALENZE:
+                         Se nel file compaiono elenchi di sostituzioni o equivalenze, estrai ogni opzione come alternativa nel pasto corrispondente.
+
+                    3. INGREDIENTI, QUANTITÀ E VALORI NUTRIZIONALI:
+                       - Per ciascuna alternativa, estrai gli ingredienti esatti scritti dall'utente con le relative grammature e calcola i macro precisi per quegli alimenti.
+                       - Se nel testo sono presenti "Macro stimati", usali con massima fedeltà.
+
+                    4. MAPPATURA AGLI SLOT DELL'APP:
+                       - Mappa ciascuna opzione o alternativa allo slot corrispondente configurato nell'app:
+                         $slotsDescription
+                       - Restituisci ESATTAMENTE "slotId" e "slotName".
+                       - Se per uno slot del piano non compaiono pasti nel testo, lascia il suo array "alternatives" vuoto [].
+
+                    Rispondi ESCLUSIVAMENTE con un JSON nel seguente formato:
+                    {
+                      "slots": [
+                        {
+                          "slotId": ${availableSlots.first().id},
+                          "slotName": "${availableSlots.first().name}",
+                          "alternatives": [
+                            {
+                              "name": "Nome Alternativa (dal testo dell'utente)",
+                              "totalCalories": 420,
+                              "totalProtein": 25,
+                              "totalCarbs": 55,
+                              "totalFat": 10,
+                              "notes": "Note dal testo dell'utente...",
+                              "ingredients": [
+                                {
+                                  "name": "Nome alimento dell'utente",
+                                  "quantity": "80g",
+                                  "calories": 280,
+                                  "protein": 10,
+                                  "carbs": 55,
+                                  "fat": 2
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
                     }
-                }
-            }
 
-            if (currentIngredients.isNotEmpty()) {
-                val totCal = currentIngredients.sumOf { it.calories }.coerceAtLeast(250)
-                val totProt = currentIngredients.sumOf { it.protein }.coerceAtLeast(15)
-                val totCarbs = currentIngredients.sumOf { it.carbs }.coerceAtLeast(20)
-                val totFat = currentIngredients.sumOf { it.fat }.coerceAtLeast(5)
-                foundAlternatives.add(
-                    ImportedAlternative(
-                        name = if (currentTitle.isNotBlank()) currentTitle else "Alternativa da documento",
-                        totalCalories = totCal,
-                        totalProtein = totProt,
-                        totalCarbs = totCarbs,
-                        totalFat = totFat,
-                        notes = "Importata da file",
-                        ingredients = currentIngredients
-                    )
-                )
-            }
+                    TESTO FORNITO DALL'UTENTE:
+                    \"\"\"
+                    $cleanText
+                    \"\"\"
+                """.trimIndent()
 
-            if (foundAlternatives.isNotEmpty()) {
-                return foundAlternatives
+                val jsonResponse = callGeminiText(prompt)
+                val parsed = parseSlotsFromJson(jsonResponse, availableSlots)
+                if (parsed.isNotEmpty()) return@withContext parsed
+            } catch (e: Exception) {
+                Log.e("GeminiService", "Error in extractAllPlanAlternativesFromText: ${e.message}", e)
             }
         }
 
-        // Fallback predefinito coerente con lo slot
-        return when {
-            lowerSlot.contains("colazione") -> listOf(
-                ImportedAlternative(
-                    name = "Alternativa 1: Porridge proteico e frutta (da documento)",
-                    totalCalories = 420,
-                    totalProtein = 28,
-                    totalCarbs = 54,
-                    totalFat = 9,
-                    notes = "Ricetta salvata nel file",
-                    ingredients = listOf(
-                        Ingredient("Fiocchi d'avena", "60g", 220, 8, 40, 4),
-                        Ingredient("Proteine whey o albume", "30g", 115, 23, 1, 1),
-                        Ingredient("Frutti di bosco o mela", "100g", 50, 1, 12, 0),
-                        Ingredient("Mandorle", "10g", 60, 2, 2, 5)
-                    )
-                ),
-                ImportedAlternative(
-                    name = "Alternativa 2: Pancake e yogurt greco (da documento)",
-                    totalCalories = 430,
-                    totalProtein = 32,
-                    totalCarbs = 50,
-                    totalFat = 8,
-                    notes = "Opzione alternativa trovata nel documento",
-                    ingredients = listOf(
-                        Ingredient("Farina d'avena", "50g", 185, 7, 33, 3),
-                        Ingredient("Albumi d'uovo", "150g", 75, 16, 1, 0),
-                        Ingredient("Yogurt greco 0%", "120g", 70, 12, 4, 0),
-                        Ingredient("Crema d'arachidi 100%", "15g", 90, 4, 2, 7)
-                    )
-                )
-            )
-            lowerSlot.contains("spuntino") || lowerSlot.contains("merenda") -> listOf(
-                ImportedAlternative(
-                    name = "Alternativa 1: Yogurt greco e frutta secca (da documento)",
-                    totalCalories = 240,
-                    totalProtein = 18,
-                    totalCarbs = 16,
-                    totalFat = 10,
-                    notes = "Spuntino veloce",
-                    ingredients = listOf(
-                        Ingredient("Yogurt greco 0%", "150g", 85, 15, 5, 0),
-                        Ingredient("Noci o mandorle", "20g", 120, 4, 3, 10),
-                        Ingredient("Frutta fresca", "80g", 40, 0, 10, 0)
-                    )
-                ),
-                ImportedAlternative(
-                    name = "Alternativa 2: Toast integrale con bresaola (da documento)",
-                    totalCalories = 250,
-                    totalProtein = 22,
-                    totalCarbs = 28,
-                    totalFat = 4,
-                    notes = "Opzione salata da documento",
-                    ingredients = listOf(
-                        Ingredient("Pane integrale", "60g", 150, 6, 28, 2),
-                        Ingredient("Bresaola della Valtellina", "50g", 85, 16, 0, 1),
-                        Ingredient("Olio extravergine d'oliva", "3g", 27, 0, 0, 3)
-                    )
-                )
-            )
-            lowerSlot.contains("cena") -> listOf(
-                ImportedAlternative(
-                    name = "Alternativa 1: Salmone al forno con patate e verdure (da documento)",
-                    totalCalories = 580,
-                    totalProtein = 42,
-                    totalCarbs = 45,
-                    totalFat = 24,
-                    notes = "Cena leggera ad alto valore biologico",
-                    ingredients = listOf(
-                        Ingredient("Filetto di salmone fresco", "180g", 360, 36, 0, 23),
-                        Ingredient("Patate novelle lesse", "200g", 155, 4, 35, 0),
-                        Ingredient("Zucchine o asparagi", "150g", 30, 2, 5, 0),
-                        Ingredient("Olio extravergine d'oliva", "5g", 45, 0, 0, 5)
-                    )
-                ),
-                ImportedAlternative(
-                    name = "Alternativa 2: Omelette con pane di segale e insalata (da documento)",
-                    totalCalories = 540,
-                    totalProtein = 38,
-                    totalCarbs = 42,
-                    totalFat = 22,
-                    notes = "Seconda opzione per la cena",
-                    ingredients = listOf(
-                        Ingredient("Uova intere (2) + Albumi (100g)", "200g", 210, 24, 2, 11),
-                        Ingredient("Pane di segale", "80g", 200, 6, 38, 2),
-                        Ingredient("Insalata mista e pomodori", "150g", 35, 2, 6, 0),
-                        Ingredient("Olio extravergine d'oliva", "10g", 90, 0, 0, 10)
-                    )
-                )
-            )
-            else -> listOf(
-                ImportedAlternative(
-                    name = "Alternativa 1: Riso basmati, pollo e verdure (da documento)",
-                    totalCalories = 560,
-                    totalProtein = 45,
-                    totalCarbs = 68,
-                    totalFat = 11,
-                    notes = "Opzione classica per $mealSlotName estratta dal documento",
-                    ingredients = listOf(
-                        Ingredient("Riso basmati a crudo", "80g", 285, 7, 63, 1),
-                        Ingredient("Petto di pollo ai ferri", "180g", 210, 41, 0, 3),
-                        Ingredient("Verdure grigliate", "150g", 35, 2, 6, 0),
-                        Ingredient("Olio extravergine d'oliva", "5g", 45, 0, 0, 5)
-                    )
-                ),
-                ImportedAlternative(
-                    name = "Alternativa 2: Pasta integrale con tonno e pomodorini (da documento)",
-                    totalCalories = 570,
-                    totalProtein = 42,
-                    totalCarbs = 72,
-                    totalFat = 12,
-                    notes = "Seconda alternativa estratta dal file",
-                    ingredients = listOf(
-                        Ingredient("Pasta integrale", "85g", 295, 11, 58, 2),
-                        Ingredient("Tonno al naturale", "160g", 180, 40, 0, 1),
-                        Ingredient("Salsa di pomodoro e basilico", "100g", 35, 1, 6, 0),
-                        Ingredient("Olio extravergine d'oliva", "7g", 62, 0, 0, 7)
-                    )
-                )
-            )
-        }
+        // Smart text fallback: extracts faithfully for each slot from the user's text
+        return@withContext fallbackExtractAllPlanAlternativesFromText(availableSlots, cleanText)
     }
 
     /**
@@ -623,204 +1212,859 @@ class GeminiNutritionService(private val context: Context) {
     ): List<ImportedSlotWithAlternatives> = withContext(Dispatchers.IO) {
         if (availableSlots.isEmpty()) return@withContext emptyList()
 
-        val detectedMime = context.contentResolver.getType(uri)?.lowercase() ?: when {
-            uri.path?.endsWith(".pdf", ignoreCase = true) == true -> "application/pdf"
-            uri.path?.endsWith(".txt", ignoreCase = true) == true -> "text/plain"
-            uri.path?.endsWith(".csv", ignoreCase = true) == true -> "text/csv"
-            uri.path?.endsWith(".json", ignoreCase = true) == true -> "application/json"
-            uri.path?.endsWith(".png", ignoreCase = true) == true -> "image/png"
-            uri.path?.endsWith(".jpg", ignoreCase = true) == true || uri.path?.endsWith(".jpeg", ignoreCase = true) == true -> "image/jpeg"
-            uri.path?.endsWith(".webp", ignoreCase = true) == true -> "image/webp"
-            else -> "application/pdf"
-        }
-
-        val textContent: String? = if (detectedMime.startsWith("text/") ||
-            uri.path?.let { p -> p.endsWith(".txt") || p.endsWith(".csv") || p.endsWith(".md") || p.endsWith(".json") } == true
-        ) {
-            try {
-                context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-            } catch (e: Exception) {
-                null
-            }
-        } else {
-            null
-        }
-
+        val inspection = inspectFile(uri)
         val slotsDescription = availableSlots.joinToString("\n") {
-            "- ID: ${it.id} (Pasto ${it.orderIndex}): '${it.name}'"
+            "- Slot ID: ${it.id} (Pasto ${it.orderIndex}): '${it.name}'"
+        }
+
+        val prompt = """
+            Sei un biologo nutrizionista clinico ed esperto in dietetica applicata.
+            L'utente ha fornito un documento PDF o immagine con la sua intera dieta o piano nutrizionale.
+            Nel piano attivo dell'applicazione sono configurati i seguenti pasti:
+            $slotsDescription
+
+            *** OBIETTIVO PRIMARIO ED INDEROGABILE: ZERO PERDITA DI INFORMAZIONI ***:
+            L'utente richiede espressamente di PRENDERE TUTTO CIÒ CHE È SCRITTO NEL FILE, SENZA PERDERE NULLA.
+            Nessuna alternativa, variante o alimento presente nel documento deve essere tralasciato o scartato!
+
+            *** REGOLE CRITICHE E IMPERATIVE ***:
+            1. ZERO ALLUCINAZIONI E MASSIMA FEDELTÀ:
+               - DEVI PRENDERE ESCLUSIVAMENTE E FEDELMENTE CIÒ CHE È SCRITTO NEL DOCUMENTO FORNITO.
+               - È SEVERAMENTE VIETATO INVENTARE pasti, cibi o alternative non presenti nel documento.
+               - NON SOSTITUIRE con cibi stereotipati (NON mettere pancake, porridge, pollo o riso a meno che non siano scritti nel file!).
+
+            2. PRENDI TUTTE LE ALTERNATIVE, NESSUNA ESCLUSA:
+               - ALTERNATIVE NUMERATE O DISTINTE: Estrai ogni opzione ("Alternativa 1", "Alternativa 2", "Opzione A/B/C", "Variante 1/2", "Menu 1/2").
+               - ALTERNATIVE NEL TESTO ("OPPURE", "IN ALTERNATIVA", "A SCELTA TRA", "/", "O"):
+                 Se all'interno di un pasto sono elencati cibi o abbinamenti alternativi (ad es. "150g petto di pollo OPPURE 130g manzo OPPURE 180g merluzzo" oppure "pane 50g o 4 fette biscottate o 40g fiocchi d'avena"),
+                 DEVI creare una distinta alternativa per CIASCUNA di queste opzioni, in modo da non perderne nessuna!
+               - MENU SETTIMANALI O SU PIÙ GIORNI (Lunedì... Domenica, o Giorno 1, 2, 3...):
+                 Se il documento presenta pasti suddivisi per giorni della settimana o menu rotazionali, estrai il pasto di CIASCUN GIORNO come un'alternativa per quel rispettivo pasto (es. "Colazione - Lunedì", "Colazione - Martedì", ecc.).
+                 NON limitarti a un solo giorno: estrai TUTTI i giorni presenti nel documento!
+               - TABELLE DI SOSTITUZIONE ED EQUIVALENZE:
+                 Se nel file compaiono tabelle o elenchi di "Sostituzioni ammesse", "Equivalenze", "Varianti proteiche/glucidiche", estrai ogni elemento come opzione alternativa assegnata al pasto corrispondente (es. colazione o pranzo/cena).
+
+            3. INGREDIENTI, QUANTITÀ E VALORI NUTRIZIONALI:
+               - Per ciascuna alternativa, estrai l'elenco completo degli alimenti con la grammatura o porzione esatta indicata nel file (es. "80g", "2 fette", "1 cucchiaio", "a piacere").
+               - Se nel documento sono presenti i "Macro stimati", usali con massima accuratezza. Altrimenti calcola con cura i macro per quegli alimenti.
+
+            4. MAPPATURA AGLI SLOT DELL'APP:
+               - Assegna ciascuna alternativa allo slot pasto appropriato configurato nell'app:
+                 $slotsDescription
+               - Mappa la colazione allo slot Colazione (usando il suo slotId esatto), il pranzo allo slot Pranzo, la cena allo slot Cena, e gli spuntini/merende allo slot Spuntino.
+               - Restituisci ESATTAMENTE il "slotId" e "slotName" corrispondenti a ciascuno slot.
+               - Se per uno slot non ci sono cibi nel file, lascia l'array vuoto []. Non inventare cibi assenti.
+
+            Rispondi ESCLUSIVAMENTE con un JSON nel formato:
+            {
+              "slots": [
+                {
+                  "slotId": ${availableSlots.first().id},
+                  "slotName": "${availableSlots.first().name}",
+                  "alternatives": [
+                    {
+                      "name": "Nome Alternativa (dal file, es. Colazione Opzione 1 o Lunedì)",
+                      "totalCalories": 420,
+                      "totalProtein": 25,
+                      "totalCarbs": 55,
+                      "totalFat": 10,
+                      "notes": "Note dal file",
+                      "ingredients": [
+                        {
+                          "name": "Nome alimento dal file",
+                          "quantity": "80g",
+                          "calories": 280,
+                          "protein": 10,
+                          "carbs": 55,
+                          "fat": 2
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        // 1. If PDF: render pages to high-res images for multimodal vision OCR
+        if (inspection.mimeType == "application/pdf" && inspection.rawBytes != null && inspection.rawBytes.isNotEmpty()) {
+            val pdfBitmaps = renderPdfToBitmaps(inspection.rawBytes)
+            val pagesBase64 = pdfBitmaps.mapNotNull { bitmapToBase64Jpeg(it) }
+            if (pagesBase64.isNotEmpty() && apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+                try {
+                    val fullPrompt = if (!inspection.textContent.isNullOrBlank()) {
+                        "$prompt\n\nTESTO RILEVATO NEL DOCUMENTO (usalo come supporto integrativo insieme a TUTTE le pagine visive fornite):\n\"\"\"\n${inspection.textContent}\n\"\"\"\n\nRICORDA: Esamina attentamente TUTTE le pagine e tabelle fornite nelle immagini per non tralasciare alcuna opzione o alternativa!"
+                    } else {
+                        prompt
+                    }
+                    val jsonResponse = callGeminiMultimodalPages(fullPrompt, pagesBase64)
+                    val parsed = parseSlotsFromJson(jsonResponse, availableSlots)
+                    if (parsed.isNotEmpty()) return@withContext parsed
+                } catch (e: Exception) {
+                    Log.e("GeminiService", "Error in PDF multimodal plan extraction: ${e.message}")
+                }
+            }
+
+            // Fallback to text extraction if PDF text was decoded
+            if (!inspection.textContent.isNullOrBlank()) {
+                val fromText = extractAllPlanAlternativesFromText(inspection.textContent, availableSlots)
+                if (fromText.isNotEmpty()) return@withContext fromText
+            }
+        }
+
+        // 2. If Image
+        if (inspection.mimeType.startsWith("image/") && inspection.rawBytes != null && inspection.rawBytes.isNotEmpty()) {
+            if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+                try {
+                    val base64Data = Base64.encodeToString(inspection.rawBytes, Base64.NO_WRAP)
+                    val jsonResponse = callGeminiMultimodal(prompt, base64Data, inspection.mimeType)
+                    val parsed = parseSlotsFromJson(jsonResponse, availableSlots)
+                    if (parsed.isNotEmpty()) return@withContext parsed
+                } catch (e: Exception) {
+                    Log.e("GeminiService", "Error in Image multimodal plan extraction: ${e.message}")
+                }
+            }
+        }
+
+        // 3. Plain text file or decoded text
+        if (inspection.isText && !inspection.textContent.isNullOrBlank()) {
+            return@withContext extractAllPlanAlternativesFromText(inspection.textContent, availableSlots)
+        }
+
+        // 4. Local text fallback
+        if (!inspection.textContent.isNullOrBlank()) {
+            return@withContext fallbackExtractAllPlanAlternativesFromText(availableSlots, inspection.textContent)
+        }
+
+        return@withContext emptyList()
+    }
+
+    private fun fallbackExtractAlternativesFromText(
+        mealSlotName: String,
+        textContent: String,
+        orderIndex: Int = 1
+    ): List<ImportedAlternative> {
+        val clean = textContent.trim()
+        if (clean.isBlank()) return emptyList()
+
+        val sectionText = findSectionForMealSlot(clean, mealSlotName, orderIndex) ?: clean
+        val blocks = splitIntoAlternativeBlocks(sectionText)
+        val result = mutableListOf<ImportedAlternative>()
+
+        blocks.forEachIndexed { idx, block ->
+            val macroRegex = Regex("""Macro\s*stimati:\s*([\d.,]+)\s*g\s*Proteine\s*\|\s*([\d.,]+)\s*g\s*Grassi\s*\|\s*([\d.,]+)\s*g\s*Carboidrati\s*\|\s*~?\s*(\d+)\s*kcal""", RegexOption.IGNORE_CASE)
+            val macroMatch = macroRegex.find(block)
+
+            val ingredients = extractIngredientsFromTextBlock(block)
+            if (ingredients.isNotEmpty() || macroMatch != null) {
+                val totCal: Int
+                val totProt: Int
+                val totCarbs: Int
+                val totFat: Int
+
+                if (macroMatch != null) {
+                    totProt = macroMatch.groupValues[1].replace(',', '.').toDouble().roundToInt()
+                    totFat = macroMatch.groupValues[2].replace(',', '.').toDouble().roundToInt()
+                    totCarbs = macroMatch.groupValues[3].replace(',', '.').toDouble().roundToInt()
+                    totCal = macroMatch.groupValues[4].toInt()
+                } else {
+                    totCal = ingredients.sumOf { it.calories }
+                    totProt = ingredients.sumOf { it.protein }
+                    totCarbs = ingredients.sumOf { it.carbs }
+                    totFat = ingredients.sumOf { it.fat }
+                }
+
+                val title = deriveAlternativeTitle(block, ingredients, idx + 1)
+                result.add(
+                    ImportedAlternative(
+                        name = title,
+                        totalCalories = totCal,
+                        totalProtein = totProt,
+                        totalCarbs = totCarbs,
+                        totalFat = totFat,
+                        notes = "Estratta fedelmente dal tuo documento",
+                        ingredients = ingredients
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private fun fallbackExtractAllPlanAlternativesFromText(
+        availableSlots: List<MealSlotEntity>,
+        textContent: String
+    ): List<ImportedSlotWithAlternatives> {
+        val result = mutableListOf<ImportedSlotWithAlternatives>()
+
+        for (slot in availableSlots) {
+            val slotAlts = fallbackExtractAlternativesFromText(slot.name, textContent, slot.orderIndex)
+            if (slotAlts.isNotEmpty()) {
+                result.add(
+                    ImportedSlotWithAlternatives(
+                        slotId = slot.id,
+                        slotOrderIndex = slot.orderIndex,
+                        slotName = slot.name,
+                        alternatives = slotAlts
+                    )
+                )
+            }
+        }
+
+        return result
+    }
+
+    private fun findSectionForMealSlot(fullText: String, slotName: String, orderIndex: Int = 1): String? {
+        val lower = fullText.lowercase()
+        val targetKeyword = when {
+            slotName.contains("colazione", ignoreCase = true) || orderIndex == 1 -> "colazione"
+            slotName.contains("spuntino 1", ignoreCase = true) || (slotName.contains("spuntino", ignoreCase = true) && orderIndex == 2) -> {
+                if (lower.contains("spuntino 1")) "spuntino 1" else "spuntino"
+            }
+            orderIndex == 2 && lower.contains("spuntino 1") -> "spuntino 1"
+            slotName.contains("pranzo", ignoreCase = true) || orderIndex == 3 -> "pranzo"
+            slotName.contains("spuntino 2", ignoreCase = true) || slotName.contains("merenda", ignoreCase = true) || (slotName.contains("spuntino", ignoreCase = true) && orderIndex == 4) -> {
+                if (lower.contains("spuntino 2")) "spuntino 2" else if (lower.contains("merenda")) "merenda" else "spuntino"
+            }
+            orderIndex == 4 && lower.contains("spuntino 2") -> "spuntino 2"
+            slotName.contains("cena", ignoreCase = true) || orderIndex >= 5 -> "cena"
+            else -> slotName.lowercase().trim()
+        }
+
+        val startIdx = lower.indexOf(targetKeyword)
+        if (startIdx == -1) return null
+
+        val allMealKeywords = listOf("colazione", "spuntino 1", "spuntino 2", "spuntino", "pranzo", "merenda", "cena", "spuntino pomeridiano", "pre nanna")
+        var nextHeaderIdx = -1
+
+        for (kw in allMealKeywords) {
+            if (kw == targetKeyword) continue
+            val idx = lower.indexOf(kw, startIdx + targetKeyword.length)
+            if (idx != -1 && (nextHeaderIdx == -1 || idx < nextHeaderIdx)) {
+                nextHeaderIdx = idx
+            }
+        }
+
+        return if (nextHeaderIdx != -1) {
+            fullText.substring(startIdx, nextHeaderIdx).trim()
+        } else {
+            fullText.substring(startIdx).trim()
+        }
+    }
+
+    private fun splitIntoAlternativeBlocks(text: String): List<String> {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotBlank() }
+        if (lines.isEmpty()) return emptyList()
+
+        val blocks = mutableListOf<MutableList<String>>()
+        var currentBlock = mutableListOf<String>()
+
+        fun isAltHeader(line: String): Boolean {
+            val l = line.lowercase()
+            return l.startsWith("alternativa") ||
+                    l.startsWith("opzione") ||
+                    l.startsWith("variante") ||
+                    l.startsWith("menu") ||
+                    l.startsWith("oppure") ||
+                    l.startsWith("in alternativa") ||
+                    l.startsWith("o anche") ||
+                    Regex("""^(?:[0-9]+[.)]|[a-zA-Z][.)]|opzione\s*[0-9a-zA-Z]+|alternativa\s*[0-9a-zA-Z]+|variante\s*[0-9a-zA-Z]+|giorno\s*[0-9]+|luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica)""", RegexOption.IGNORE_CASE).containsMatchIn(line)
+        }
+
+        for (line in lines) {
+            val l = line.lowercase()
+            if (l.endsWith(":") && (l.contains("colazione") || l.contains("pranzo") || l.contains("cena") || l.contains("spuntino"))) {
+                continue
+            }
+
+            if (isAltHeader(line)) {
+                if (currentBlock.isNotEmpty()) {
+                    blocks.add(currentBlock)
+                    currentBlock = mutableListOf()
+                }
+                currentBlock.add(line)
+            } else {
+                currentBlock.add(line)
+            }
+        }
+
+        if (currentBlock.isNotEmpty()) {
+            blocks.add(currentBlock)
+        }
+
+        return if (blocks.isNotEmpty()) {
+            blocks.map { it.joinToString("\n") }
+        } else {
+            listOf(text)
+        }
+    }
+
+    private fun extractIngredientsFromTextBlock(block: String): List<Ingredient> {
+        val ingredients = mutableListOf<Ingredient>()
+        val lines = block.lines().map { it.trim() }.filter { it.isNotBlank() }
+
+        for (line in lines) {
+            var clean = line
+                .removePrefix("-").removePrefix("•").removePrefix("*").removePrefix("+")
+                .trim()
+
+            val lower = clean.lowercase()
+            if (lower.startsWith("macro stimat") || lower.contains("macro stimati")) {
+                continue
+            }
+
+            if (lower.startsWith("alternativa") || lower.startsWith("opzione") || lower.startsWith("variante") ||
+                lower.startsWith("oppure") || lower.startsWith("in alternativa")) {
+                val afterColon = clean.substringAfter(":", "").trim()
+                if (afterColon.isNotBlank()) {
+                    clean = afterColon
+                } else {
+                    continue
+                }
+            }
+
+            if (clean.length < 2) continue
+
+            val parsed = parseIngredientLine(clean)
+            if (parsed != null) {
+                val est = fallbackEstimateIngredient(parsed.first, parsed.second)
+                ingredients.add(est)
+            }
+        }
+
+        return ingredients
+    }
+
+    private fun parseIngredientLine(line: String): Pair<String, String>? {
+        var clean = line.replace(Regex("""^[0-9]+[).]\s*"""), "").trim()
+        clean = clean.removePrefix("-").removePrefix("•").removePrefix("*").trim()
+        if (clean.length < 2) return null
+
+        val startQtyRegex = Regex("""^([\d.,]+\s*(?:g|gr|grammi|ml|l|pz|fette|fetta|cucchiai|cucchiaio|uova|uovo|scatoletta|scatolette|vasetto|vasetti|misurino|scoop|tazza|tazze|bicchiere|bicchieri|porzione|porzioni)?)\s*(?:di\s+|d'|del\s+)?(.*)$""", RegexOption.IGNORE_CASE)
+        val matchStart = startQtyRegex.find(clean)
+        if (matchStart != null) {
+            val q = matchStart.groupValues[1].trim()
+            val n = matchStart.groupValues[2].trim()
+            if (n.length >= 2) {
+                return Pair(n, if (q.isNotBlank()) q else "100g")
+            }
+        }
+
+        val endQtyRegex = Regex("""^(.*?)\s*\(?([\d.,]+\s*(?:g|gr|grammi|ml|l|pz|fette|cucchiai|uova|scatoletta|vasetto|porzione))\)?$""", RegexOption.IGNORE_CASE)
+        val matchEnd = endQtyRegex.find(clean)
+        if (matchEnd != null) {
+            val n = matchEnd.groupValues[1].trim()
+            val q = matchEnd.groupValues[2].trim()
+            if (n.length >= 2) {
+                return Pair(n, q)
+            }
+        }
+
+        return Pair(clean, "1 porzione")
+    }
+
+    private fun deriveAlternativeTitle(block: String, ingredients: List<Ingredient>, index: Int): String {
+        val firstLine = block.lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
+        val lowerFirst = firstLine.lowercase()
+        if (lowerFirst.startsWith("alternativa") || lowerFirst.startsWith("opzione") || lowerFirst.startsWith("variante")) {
+            val titlePart = firstLine.substringBefore(":").trim()
+            val after = firstLine.substringAfter(":", "").trim()
+            return if (after.isNotBlank()) "$titlePart: $after" else "$titlePart: ${ingredients.take(2).joinToString(" e ") { it.name }}"
+        }
+        val topFoods = ingredients.take(2).joinToString(" e ") { it.name }
+        return "Alternativa $index: $topFoods"
+    }
+
+    /**
+     * Multi-turn interactive Pantry Chef Chat with Gemini.
+     * Takes user's pantry contents and desired meal, references the active plan's targets,
+     * and creates a customized meal proposal that can be copied to the plan or logged in outdoor day.
+     */
+    suspend fun sendPantryChefMessage(
+        history: List<ChatMessage>,
+        userMessage: String,
+        activePlanContext: String,
+        pantryItems: List<String> = emptyList()
+    ): PantryChefResponse = withContext(Dispatchers.IO) {
+        val cleanMsg = userMessage.trim()
+        if (cleanMsg.isBlank()) {
+            return@withContext PantryChefResponse(
+                replyText = "Ciao! Dimmi cosa hai in dispensa o in frigorifero e quale pasto vuoi preparare (colazione, pranzo, spuntino o cena)."
+            )
         }
 
         if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
             try {
-                val prompt = """
-                    Sei un biologo nutrizionista e preparatore atletico esperto.
-                    L'utente ha fornito un file completo (dieta, piano nutrizionale o documento con pasti e opzioni).
-                    Nel piano attivo dell'applicazione sono configurati i seguenti pasti dell'utente:
-                    $slotsDescription
-                    
-                    Il tuo compito fondamentale:
-                    1. Scannerizza e leggi attentamente l'intero documento.
-                    2. Identifica per CIASCUN pasto della giornata tutte le alternative, varianti o opzioni salvate (es. Colazione Alternativa 1/2, Spuntini, Pranzo opzione A/B, Cena, ecc.).
-                    3. Capisci intelligentemente a quale dei pasti dell'applicazione ('slotId' / 'slotName' indicati sopra) appartiene ciascun gruppo di alimenti/alternative.
-                    4. Assegna ciascuna alternativa allo slot pasto appropriato. Se per un pasto ci sono 2, 3 o più alternative, includile tutte nell'array "alternatives" di quello slot.
-                    5. Per ogni alternativa estrai:
-                       - "name": Nome sintetico e descrittivo (es. "Alternativa 1: Pancake d'avena con yogurt", "Riso e pollo al curry", ecc.)
-                       - "totalCalories": Calorie totali (kcal)
-                       - "totalProtein": Proteine totali in grammi
-                       - "totalCarbs": Carboidrati totali in grammi
-                       - "totalFat": Grassi totali in grammi
-                       - "notes": Eventuali indicazioni o note scritte nel documento
-                       - "ingredients": Elenco dettagliato degli alimenti con "name", "quantity" (es. "80g", "150g"), "calories", "protein", "carbs", "fat".
-                    6. Stima con accuratezza calorie e macronutrienti se non scritti esplicitamente accanto agli ingredienti.
-                    
-                    Rispondi ESCLUSIVAMENTE con un JSON nel seguente formato:
+                val systemPrompt = """
+                    Sei "Apex Nutritionist & Pantry Chef", un biologo nutrizionista clinico ed executive culinary coach d'élite integrato nell'app NutriPlan.
+
+                    IL TUO SCOPO PRIMARIO:
+                    L'utente ti dice quali ingredienti ha nella sua dispensa o nel frigorifero e quale pasto desidera (Colazione, Pranzo, Spuntino, Cena).
+                    Tu devi creare un pasto sano, delizioso, semplice e calibrato al millimetro sui target calorici e di macronutrienti dello slot corrispondente nel suo piano nutrizionale attivo.
+
+                    DATI DEL PIANO NUTRIZIONALE ATTIVO:
+                    $activePlanContext
+
+                    INGREDIENTI REGISTRATI IN DISPENSA:
+                    ${if (pantryItems.isNotEmpty()) pantryItems.joinToString(", ") else "Non specificati in anticipo; affidati agli ingredienti che l'utente elenca."}
+
+                    REGOLE CRITICHE E SCIENTIFICHE:
+                    1. RICONOSCIMENTO DELLO SLOT / PASTO:
+                       - Identifica per quale pasto l'utente desidera la ricetta (Colazione, Pranzo, Spuntino, Cena). Se non viene specificato chiaramente, deduci il pasto più idoneo in base agli ingredienti oppure proponi Pranzo o Cena.
+                       - Calcola con cura le grammature degli ingredienti per avvicinarti con precisione al target calorico e di macronutrienti di quello slot nel piano attivo.
+                    2. FORMULA ATWATER (LEGGE FISICA FONDAMENTALE):
+                       - Calorie totali = (Proteine * 4) + (Carboidrati * 4) + (Grassi * 9).
+                       - Non generare MAI calorie casuali o disallineate dai macronutrienti.
+                       - Gli alimenti base (pasta, riso, carne, pesce, legumi, cereali) si intendono pesati A CRUDO, salvo diversa specifica.
+                       - Includi sempre condimenti realistici necessari alla cottura (es. 10g olio EVO).
+                    3. FORMATO DI RISPOSTA:
+                       - Rispondi in italiano in modo chiaro, empatico, professionale, con 2-3 passaggi rapidi di preparazione o cottura.
+                       - QUANDO CREI O PROSEGUI UN PASTO, devi SEMPRE concludere la tua risposta con un blocco JSON racchiuso esattamente tra ```json e ``` contenente la struttura esatta del pasto, con cui l'applicazione genererà i pulsanti funzionali 'Copia nel Piano' e 'Registra in Giornata Fuori':
+                    ```json
                     {
-                      "slots": [
-                        {
-                          "slotId": ${availableSlots.first().id},
-                          "slotName": "${availableSlots.first().name}",
-                          "alternatives": [
-                            {
-                              "name": "Nome Alternativa",
-                              "totalCalories": 420,
-                              "totalProtein": 30,
-                              "totalCarbs": 52,
-                              "totalFat": 10,
-                              "notes": "Note dal documento",
-                              "ingredients": [
-                                {
-                                  "name": "Nome alimento",
-                                  "quantity": "80g",
-                                  "calories": 250,
-                                  "protein": 12,
-                                  "carbs": 40,
-                                  "fat": 4
-                                }
-                              ]
-                            }
-                          ]
-                        }
+                      "mealName": "Nome invitante del pasto",
+                      "targetSlotName": "Nome dello slot (es. Pranzo, Cena, Spuntino, Colazione)",
+                      "calories": 650,
+                      "protein": 42,
+                      "carbs": 68,
+                      "fat": 18,
+                      "notes": "Consigli rapidi di preparazione",
+                      "ingredients": [
+                        {"name": "Petto di pollo", "quantity": "180g", "calories": 200, "protein": 42, "carbs": 0, "fat": 3},
+                        {"name": "Riso basmati", "quantity": "80g", "calories": 280, "protein": 6, "carbs": 62, "fat": 1},
+                        {"name": "Zucchine", "quantity": "200g", "calories": 35, "protein": 3, "carbs": 6, "fat": 0},
+                        {"name": "Olio EVO", "quantity": "15g", "calories": 135, "protein": 0, "carbs": 0, "fat": 15}
                       ]
                     }
+                    ```
+                       - Se l'utente fa solo una domanda discorsiva generale, rispondi senza includere il blocco JSON.
                 """.trimIndent()
 
-                val jsonResponse: JSONObject? = if (textContent != null && textContent.isNotBlank()) {
-                    val textPrompt = "$prompt\n\nCONTENUTO DEL FILE TESTUALE:\n$textContent"
-                    callGeminiText(textPrompt)
-                } else {
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { stream ->
-                        val buffer = ByteArrayOutputStream()
-                        val data = ByteArray(16384)
-                        var nRead: Int
-                        var totalBytes = 0
-                        while (stream.read(data, 0, data.size).also { nRead = it } != -1 && totalBytes < 8 * 1024 * 1024) {
-                            buffer.write(data, 0, nRead)
-                            totalBytes += nRead
-                        }
-                        buffer.toByteArray()
-                    }
-
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                        val effectiveMime = if (detectedMime.startsWith("image/")) detectedMime else "application/pdf"
-                        callGeminiMultimodal(prompt, base64Data, effectiveMime)
-                    } else {
-                        null
-                    }
-                }
-
-                if (jsonResponse != null && jsonResponse.has("slots")) {
-                    val slotsArr = jsonResponse.getJSONArray("slots")
-                    val result = mutableListOf<ImportedSlotWithAlternatives>()
-
-                    for (i in 0 until slotsArr.length()) {
-                        val slotObj = slotsArr.getJSONObject(i)
-                        val targetSlotId = slotObj.optLong("slotId", -1L)
-                        val matchedSlot = availableSlots.find { it.id == targetSlotId }
-                            ?: availableSlots.find { it.name.equals(slotObj.optString("slotName"), ignoreCase = true) }
-                            ?: if (i < availableSlots.size) availableSlots[i] else null
-
-                        if (matchedSlot != null) {
-                            val altArr = slotObj.optJSONArray("alternatives")
-                            val altList = mutableListOf<ImportedAlternative>()
-                            if (altArr != null) {
-                                for (j in 0 until altArr.length()) {
-                                    val obj = altArr.getJSONObject(j)
-                                    val ingArr = obj.optJSONArray("ingredients")
-                                    val ingList = mutableListOf<Ingredient>()
-                                    if (ingArr != null) {
-                                        for (k in 0 until ingArr.length()) {
-                                            val ingObj = ingArr.getJSONObject(k)
-                                            ingList.add(
-                                                Ingredient(
-                                                    name = ingObj.optString("name", "Alimento"),
-                                                    quantity = ingObj.optString("quantity", "100g"),
-                                                    calories = ingObj.optInt("calories", 0),
-                                                    protein = ingObj.optInt("protein", 0),
-                                                    carbs = ingObj.optInt("carbs", 0),
-                                                    fat = ingObj.optInt("fat", 0)
-                                                )
-                                            )
-                                        }
-                                    }
-
-                                    val cal = obj.optInt("totalCalories", ingList.sumOf { it.calories })
-                                    val prot = obj.optInt("totalProtein", ingList.sumOf { it.protein })
-                                    val carbs = obj.optInt("totalCarbs", ingList.sumOf { it.carbs })
-                                    val fat = obj.optInt("totalFat", ingList.sumOf { it.fat })
-                                    val name = obj.optString("name", "Alternativa ${j + 1}")
-                                    val notes = obj.optString("notes", "")
-
-                                    altList.add(
-                                        ImportedAlternative(
-                                            name = name,
-                                            totalCalories = cal,
-                                            totalProtein = prot,
-                                            totalCarbs = carbs,
-                                            totalFat = fat,
-                                            notes = notes,
-                                            ingredients = ingList
-                                        )
-                                    )
-                                }
-                            }
-
-                            if (altList.isNotEmpty()) {
-                                result.add(
-                                    ImportedSlotWithAlternatives(
-                                        slotId = matchedSlot.id,
-                                        slotOrderIndex = matchedSlot.orderIndex,
-                                        slotName = matchedSlot.name,
-                                        alternatives = altList
-                                    )
-                                )
-                            }
-                        }
-                    }
-
-                    if (result.isNotEmpty()) {
-                        return@withContext result
-                    }
+                val rawResponse = callGeminiChat(systemPrompt, history, cleanMsg)
+                if (!rawResponse.isNullOrBlank()) {
+                    return@withContext parsePantryChefResponse(rawResponse)
                 }
             } catch (e: Exception) {
-                Log.e("GeminiService", "Error extracting all plan alternatives: ${e.message}", e)
+                Log.e("GeminiService", "Error in sendPantryChefMessage: ${e.message}", e)
             }
         }
 
-        // Fallback robusto: distribuisce le alternative estratte a tutti gli slot del piano
-        return@withContext availableSlots.map { slot ->
-            val slotAlts = fallbackExtractAlternatives(slot.name, textContent)
-            ImportedSlotWithAlternatives(
-                slotId = slot.id,
-                slotOrderIndex = slot.orderIndex,
-                slotName = slot.name,
-                alternatives = slotAlts
+        // Local Smart Fallback
+        return@withContext fallbackPantryChef(cleanMsg, activePlanContext, pantryItems)
+    }
+
+    private fun callGeminiChat(
+        systemInstruction: String,
+        history: List<ChatMessage>,
+        currentMessage: String
+    ): String? {
+        val requestJson = JSONObject().apply {
+            val sysObj = JSONObject().apply {
+                val sysParts = JSONArray().apply {
+                    put(JSONObject().put("text", systemInstruction))
+                }
+                put("parts", sysParts)
+            }
+            put("system_instruction", sysObj)
+
+            val contentsArr = JSONArray()
+            // Add up to last 10 turns of history
+            history.takeLast(10).forEach { msg ->
+                val role = if (msg.isUser) "user" else "model"
+                val item = JSONObject().apply {
+                    put("role", role)
+                    val pArr = JSONArray().apply {
+                        put(JSONObject().put("text", msg.text))
+                    }
+                    put("parts", pArr)
+                }
+                contentsArr.put(item)
+            }
+
+            // Current message
+            val currentItem = JSONObject().apply {
+                put("role", "user")
+                val pArr = JSONArray().apply {
+                    put(JSONObject().put("text", currentMessage))
+                }
+                put("parts", pArr)
+            }
+            contentsArr.put(currentItem)
+
+            put("contents", contentsArr)
+        }
+
+        val body = requestJson.toString().toRequestBody("application/json".toMediaType())
+
+        val chatModels = candidateModels
+        for (model in chatModels) {
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+            val req = Request.Builder().url(url).post(body).build()
+
+            try {
+                client.newCall(req).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val errBody = response.body?.string() ?: ""
+                        Log.e("GeminiService", "Chat HTTP ${response.code} with $model: $errBody")
+                        return@use
+                    }
+                    val resStr = response.body?.string() ?: return@use
+                    val root = JSONObject(resStr)
+                    val candidates = root.optJSONArray("candidates") ?: return@use
+                    if (candidates.length() == 0) return@use
+                    val content = candidates.getJSONObject(0).optJSONObject("content") ?: return@use
+                    val parts = content.optJSONArray("parts") ?: return@use
+                    if (parts.length() == 0) return@use
+                    val text = parts.getJSONObject(0).optString("text", "")
+                    if (text.isNotBlank()) return text
+                }
+            } catch (e: Exception) {
+                Log.e("GeminiService", "Exception in callGeminiChat with $model: ${e.message}")
+            }
+        }
+        return null
+    }
+
+    suspend fun sendOutdoorMealChatMessage(
+        history: List<Pair<String, Boolean>>,
+        currentMessage: String,
+        mealSlotName: String? = null
+    ): OutdoorMealChatResult = withContext(Dispatchers.IO) {
+        val cleanMsg = currentMessage.trim()
+        if (cleanMsg.isBlank()) return@withContext OutdoorMealChatResult(
+            replyText = if (!mealSlotName.isNullOrBlank()) "Descrivimi pure cosa vorresti mangiare per $mealSlotName!" else "Descrivimi pure cosa stai mangiando!",
+            isFinalEstimate = false
+        )
+
+        val targetContext = if (!mealSlotName.isNullOrBlank()) {
+            "L'utente sta creando un'alternativa per il pasto '$mealSlotName' del proprio piano alimentare (o stimando un pasto). Genera una proposta dettagliata, bilanciata e realistica."
+        } else {
+            "L'utente sta mangiando fuori casa (o al ristorante/bar/lavoro) e desidera stimare calorie e macronutrienti per registrare il pasto nella sua 'Giornata Fuori'."
+        }
+
+        val systemInstruction = """
+            Sei un biologo nutrizionista clinico esperto in ristorazione, nutrizione clinica e stime nutrizionali.
+            $targetContext
+            
+            PROTOCOLLO DI CONVERSAZIONE (CRITICO):
+            1. PRIMO CONTATTO / DETTAGLI INCOMPLETI:
+               Se l'utente ha appena descritto il pasto in modo rapido o sintetico (es. 'Ho preso una tagliata con patate' o 'Pizza margherita e birra'), NON dare subito la stima finale ufficiale!
+               Rispondi invece in modo cordiale, empatico e sintetico ponendo 1 o 2 domande brevi e mirate per chiarire i dettagli chiave (ad esempio: porzione indicativa, tipo di cottura/condimento con olio o salse, eventuale pane o bibite/dolci).
+               In questa fase, scrivi solo il testo colloquiale con le tue domande (NON inserire blocco JSON, oppure metti "isFinal": false).
+            
+            2. RISPOSTA AI CHIARIMENTI / STIMA FINALE:
+               Se l'utente risponde alle tue domande, oppure ha già fornito descrizioni dettagliate, oppure dice 'è tutto qui / calcola / stima approssimativa' o dopo 1-2 scambi:
+               Fornisci una spiegazione cordiale e includi obbligatoriamente alla fine del messaggio un blocco JSON formattato ESATTAMENTE così:
+               ```json
+               {
+                 "isFinal": true,
+                 "mealName": "Nome descrittivo del pasto",
+                 "calories": 720,
+                 "protein": 42,
+                 "carbs": 65,
+                 "fat": 28,
+                 "notes": "Spiegazione rapida della stima",
+                 "ingredients": [
+                   {"name": "Alimento 1", "quantity": "150g", "calories": 250, "protein": 30, "carbs": 0, "fat": 5},
+                   {"name": "Contorno/Condimento", "quantity": "100g", "calories": 180, "protein": 3, "carbs": 25, "fat": 8}
+                 ]
+               }
+               ```
+            3. REGOLA RIGOROSA FORMULA ATWATER:
+               Le calorie DEVONO corrispondere esattamente a: (protein * 4) + (carbs * 4) + (fat * 9).
+               Per ogni ingrediente, specifica anche calories, protein, carbs e fat realistici in modo che la loro somma corrisponda ai totali.
+
+            4. LINEE GUIDA REALISTICHE CALORIE PASTI FUORI CASA (OUTDOOR):
+               - SUSHI ALL YOU CAN EAT (AYCE): porzioni abbondanti implicano grandi quantitativi di riso condito (con aceto e zucchero), 20-30+ roll/uramaki/nigiri, tempura, fritti, tartare e salse. Un All You Can Eat abbondante varia tipicamente tra 1900 e 2600 kcal (75-95g proteine, 260-320g carboidrati, 55-75g grassi). NON STIMARE MAI 500 KCAL per un all you can eat abbondante!
+               - RISTORANTE / TRATTORIA: Primo + secondo + contorno con olio + vino = 1100 - 1700 kcal.
+               - PIZZERIA: Pizza con birra e dolce = 1200 - 1800 kcal.
+               - HAMBURGERIA / PUB: Hamburger doppio con formaggio, patatine fritte e salse = 1200 - 1650 kcal.
+               - APERICENA / BUFFET: Drink alcolico + finger food fritti e pizzette = 900 - 1450 kcal.
+        """.trimIndent()
+
+        if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
+            try {
+                val chatHistory = history.map { (text, isUser) ->
+                    ChatMessage(
+                        isUser = isUser,
+                        text = text
+                    )
+                }
+                val rawResponse = callGeminiChat(systemInstruction, chatHistory, cleanMsg)
+                if (!rawResponse.isNullOrBlank()) {
+                    return@withContext parseOutdoorMealChatResponse(rawResponse, cleanMsg)
+                }
+            } catch (e: Exception) {
+                Log.e("GeminiService", "Exception in sendOutdoorMealChatMessage: ${e.message}")
+            }
+        }
+
+        return@withContext fallbackOutdoorMealChat(history, cleanMsg, mealSlotName)
+    }
+
+    private fun parseOutdoorMealChatResponse(rawText: String, userMsg: String): OutdoorMealChatResult {
+        val jsonRegex = Pattern.compile("```(?:json)?\\s*(\\{[\\s\\S]*?\\})\\s*```", Pattern.MULTILINE)
+        val matcher = jsonRegex.matcher(rawText)
+
+        if (matcher.find()) {
+            val jsonStr = matcher.group(1)
+            try {
+                if (jsonStr != null) {
+                    val obj = JSONObject(jsonStr)
+                    val isFinal = obj.optBoolean("isFinal", true)
+                    val mealName = obj.optString("mealName", if (userMsg.isNotBlank()) userMsg else "Pasto fuori casa")
+                    val p = obj.optInt("protein", 25).coerceAtLeast(0)
+                    val c = obj.optInt("carbs", 50).coerceAtLeast(0)
+                    val f = obj.optInt("fat", 18).coerceAtLeast(0)
+                    val atwater = (p * 4 + c * 4 + f * 9)
+                    val rawCal = obj.optInt("calories", atwater)
+                    val finalCal = if (rawCal > 0 && Math.abs(rawCal - atwater) <= (atwater * 0.15).coerceAtLeast(20.0)) rawCal else atwater
+                    val notes = obj.optString("notes", "")
+
+                    val ingArr = obj.optJSONArray("ingredients")
+                    val ingList = mutableListOf<Ingredient>()
+                    if (ingArr != null) {
+                        for (i in 0 until ingArr.length()) {
+                            ingList.add(Ingredient.fromJsonObject(ingArr.getJSONObject(i)))
+                        }
+                    }
+
+                    val dishResult = DishEstimateResult(
+                        mealName = mealName,
+                        calories = finalCal,
+                        protein = p,
+                        carbs = c,
+                        fat = f,
+                        followUpQuestion = null,
+                        ingredients = ingList
+                    )
+
+                    val cleanReply = rawText.replace(matcher.group(0) ?: "", "").trim()
+                    return OutdoorMealChatResult(
+                        replyText = if (cleanReply.isNotBlank()) cleanReply else "Ecco la stima per il tuo pasto fuori casa:",
+                        isFinalEstimate = isFinal,
+                        estimate = if (isFinal) dishResult else null
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w("GeminiService", "Could not parse JSON from outdoor chat: ${e.message}")
+            }
+        }
+
+        return OutdoorMealChatResult(
+            replyText = rawText.trim(),
+            isFinalEstimate = false,
+            estimate = null
+        )
+    }
+
+    private fun fallbackOutdoorMealChat(
+        history: List<Pair<String, Boolean>>,
+        currentMessage: String,
+        mealSlotName: String? = null
+    ): OutdoorMealChatResult {
+        val userTurnCount = history.count { it.second } + 1
+        if (userTurnCount == 1) {
+            val promptTarget = if (!mealSlotName.isNullOrBlank()) "per $mealSlotName" else "del pasto"
+            return OutdoorMealChatResult(
+                replyText = "Sembra un'ottima opzione $promptTarget! Per calcolare una stima accurata: che quantità indicativa hai in mente? C'è qualche condimento (olio, formaggio, salse) o contorno/pane?",
+                isFinalEstimate = false,
+                estimate = null
+            )
+        } else {
+            val combinedNotes = history.filter { it.second }.joinToString(" ") { it.first } + " " + currentMessage
+            val dishEstimate = fallbackEstimateDish(combinedNotes, false)
+            val finishPrompt = if (!mealSlotName.isNullOrBlank()) {
+                "Perfetto! Ho calcolato i valori nutrizionali e gli ingredienti per $mealSlotName. Puoi confermare e aggiungerla al tuo piano con il pulsante qui sotto."
+            } else {
+                "Perfetto! In base ai dettagli che mi hai fornito ho calcolato la stima nutrizionale del pasto. Puoi confermarla con il pulsante qui sotto per aggiungerla alla tua Giornata Fuori."
+            }
+            return OutdoorMealChatResult(
+                replyText = finishPrompt,
+                isFinalEstimate = true,
+                estimate = dishEstimate
             )
         }
     }
 
-    // Model selection following Gemini API guidelines: 'gemini-3.5-flash' task default, 'gemini-flash-latest' alias
-    private val candidateModels = listOf("gemini-3.5-flash", "gemini-flash-latest")
+    private fun parsePantryChefResponse(rawText: String): PantryChefResponse {
+        var replyText = rawText
+        var proposal: GeneratedMealProposal? = null
+
+        val jsonRegex = Pattern.compile("```(?:json)?\\s*(\\{[\\s\\S]*?\\})\\s*```", Pattern.MULTILINE)
+        val matcher = jsonRegex.matcher(rawText)
+
+        if (matcher.find()) {
+            val jsonStr = matcher.group(1)
+            try {
+                if (jsonStr != null) {
+                    val obj = JSONObject(jsonStr)
+                    val mealName = obj.optString("mealName", "Pasto dalla dispensa")
+                    val targetSlot = obj.optString("targetSlotName", "Pasto").takeIf { it.isNotBlank() }
+                    val p = obj.optInt("protein", 0).coerceAtLeast(0)
+                    val c = obj.optInt("carbs", 0).coerceAtLeast(0)
+                    val f = obj.optInt("fat", 0).coerceAtLeast(0)
+                    val atwater = (p * 4 + c * 4 + f * 9)
+                    val rawCal = obj.optInt("calories", atwater)
+                    val finalCal = if (rawCal > 0 && Math.abs(rawCal - atwater) <= (atwater * 0.15).coerceAtLeast(15.0)) rawCal else atwater
+                    val notes = obj.optString("notes", "")
+
+                    val ingArr = obj.optJSONArray("ingredients")
+                    val ingList = mutableListOf<Ingredient>()
+                    if (ingArr != null) {
+                        for (i in 0 until ingArr.length()) {
+                            ingList.add(Ingredient.fromJsonObject(ingArr.getJSONObject(i)))
+                        }
+                    }
+
+                    proposal = GeneratedMealProposal(
+                        name = mealName,
+                        targetSlotName = targetSlot,
+                        calories = finalCal,
+                        protein = p,
+                        carbs = c,
+                        fat = f,
+                        notes = notes,
+                        ingredients = ingList
+                    )
+
+                    // Clean out the raw json block from the visible conversational reply
+                    replyText = rawText.replace(matcher.group(0) ?: "", "").trim()
+                }
+            } catch (e: Exception) {
+                Log.w("GeminiService", "Could not parse JSON block from chat: ${e.message}")
+            }
+        }
+
+        return PantryChefResponse(
+            replyText = replyText.ifBlank { "Ecco la proposta calibrata sui tuoi macro:" },
+            mealProposal = proposal
+        )
+    }
+
+    private fun fallbackPantryChef(
+        userMessage: String,
+        activePlanContext: String,
+        pantryItems: List<String>
+    ): PantryChefResponse {
+        val lower = (userMessage + " " + pantryItems.joinToString(" ")).lowercase()
+
+        val isColazione = lower.contains("colazione")
+        val isSpuntino = lower.contains("spuntino") || lower.contains("merenda")
+        val isCena = lower.contains("cena")
+        val isPranzo = lower.contains("pranzo") || (!isColazione && !isSpuntino && !isCena)
+
+        val targetSlotName = when {
+            isColazione -> "Colazione"
+            isSpuntino -> "Spuntino"
+            isCena -> "Cena"
+            else -> "Pranzo"
+        }
+
+        return when {
+            isColazione || lower.contains("avena") || lower.contains("yogurt") -> {
+                val ingList = listOf(
+                    Ingredient("Yogurt greco 0%", "170g", 97, 17, 7, 0),
+                    Ingredient("Fiocchi d'avena", "50g", 185, 7, 33, 4),
+                    Ingredient("Mela", "150g (1 mela)", 78, 0, 21, 0),
+                    Ingredient("Noci sgusciate", "15g", 98, 2, 2, 10)
+                )
+                val cal = ingList.sumOf { it.calories }
+                val p = ingList.sumOf { it.protein }
+                val c = ingList.sumOf { it.carbs }
+                val f = ingList.sumOf { it.fat }
+                PantryChefResponse(
+                    replyText = "Ho analizzato la tua dispensa per la tua **$targetSlotName**!\n\nTi propongo una **Power Bowl d'Avena e Yogurt Greco con Mela e Noci**, leggera ma ad alto potere saziante e ricca di proteine nobili e acidi grassi essenziali.\n\nPreparazione:\n1. Versa lo yogurt greco in una ciotola con i fiocchi d'avena.\n2. Taglia la mela a cubetti e aggiungila insieme alle noci sbriciolate.\n3. A piacere puoi aggiungere un pizzico di cannella per esaltare il sapore.",
+                    mealProposal = GeneratedMealProposal(
+                        name = "Power Bowl Avena, Yogurt Greco e Mela",
+                        targetSlotName = targetSlotName,
+                        calories = cal,
+                        protein = p,
+                        carbs = c,
+                        fat = f,
+                        notes = "Colazione/Spuntino energetico e saziante pronto in 2 minuti.",
+                        ingredients = ingList
+                    )
+                )
+            }
+            lower.contains("uov") || lower.contains("album") -> {
+                val ingList = listOf(
+                    Ingredient("Uova intere", "1 uovo (55g)", 72, 7, 0, 5),
+                    Ingredient("Albume d'uovo", "150g", 78, 16, 1, 0),
+                    Ingredient("Pane integrale", "70g (2 fette)", 175, 6, 34, 2),
+                    Ingredient("Zucchine", "200g", 35, 3, 6, 0),
+                    Ingredient("Olio extravergine d'oliva", "10g (1 cucchiaio)", 90, 0, 0, 10)
+                )
+                val cal = ingList.sumOf { it.calories }
+                val p = ingList.sumOf { it.protein }
+                val c = ingList.sumOf { it.carbs }
+                val f = ingList.sumOf { it.fat }
+                PantryChefResponse(
+                    replyText = "Ottima scelta con le uova! Ho creato per il tuo **$targetSlotName** una **Frittata proteica alle Zucchine con Pane Integrale tostato**.\n\nÈ calibrata per fornirti proteine nobili con una quantità controllata di grassi buoni (grazie all'unione di 1 uovo intero con 150g di albume) e carboidrati complessi a rilascio graduale.\n\nPreparazione:\n1. Taglia le zucchine a rondelle sottili e falle saltare 3 minuti in padella antiaderente con metà dell'olio EVO.\n2. Sbatti l'uovo con l'albume, un pizzico di sale e pepe, versa sulle zucchine e cuoci con coperchio per 4-5 minuti.\n3. Accompagna con il pane integrale tostato.",
+                    mealProposal = GeneratedMealProposal(
+                        name = "Frittata Proteica di Zucchine e Pane Integrale",
+                        targetSlotName = targetSlotName,
+                        calories = cal,
+                        protein = p,
+                        carbs = c,
+                        fat = f,
+                        notes = "Piatto rapido e bilanciato ricco di micronutrienti e proteine nobili.",
+                        ingredients = ingList
+                    )
+                )
+            }
+            lower.contains("tonno") -> {
+                val ingList = listOf(
+                    Ingredient("Pasta di semola", "80g", 284, 10, 58, 1),
+                    Ingredient("Tonno al naturale", "112g (2 scatolette)", 114, 26, 0, 1),
+                    Ingredient("Pomodorini", "150g", 27, 1, 6, 0),
+                    Ingredient("Olio extravergine d'oliva", "10g (1 cucchiaio)", 90, 0, 0, 10)
+                )
+                val cal = ingList.sumOf { it.calories }
+                val p = ingList.sumOf { it.protein }
+                val c = ingList.sumOf { it.carbs }
+                val f = ingList.sumOf { it.fat }
+                PantryChefResponse(
+                    replyText = "Con il tonno e la pasta della tua dispensa, ecco il pasto ideale per il tuo **$targetSlotName**: **Pasta Mediterranea con Tonno e Pomodorini**!\n\nUna ricetta classica e veloce, che garantisce l'energia dei carboidrati complessi e la purezza proteica del tonno al naturale.\n\nPreparazione:\n1. Lessa la pasta in acqua bollente salata.\n2. In una padella fai scaldare l'olio con i pomodorini tagliati a spicchi per 2 minuti.\n3. Scola la pasta al dente, uniscila ai pomodorini e al tonno sgocciolato a fuoco spento.",
+                    mealProposal = GeneratedMealProposal(
+                        name = "Pasta Mediterranea Tonno e Pomodorini",
+                        targetSlotName = targetSlotName,
+                        calories = cal,
+                        protein = p,
+                        carbs = c,
+                        fat = f,
+                        notes = "Primo piatto fresco e sportivo pronto in 10 minuti.",
+                        ingredients = ingList
+                    )
+                )
+            }
+            else -> {
+                val ingList = listOf(
+                    Ingredient("Riso basmati crudo", "80g", 280, 6, 62, 1),
+                    Ingredient("Petto di pollo crudo", "180g", 198, 41, 0, 3),
+                    Ingredient("Zucchine", "200g", 35, 3, 6, 0),
+                    Ingredient("Olio extravergine d'oliva", "10g (1 cucchiaio)", 90, 0, 0, 10)
+                )
+                val cal = ingList.sumOf { it.calories }
+                val p = ingList.sumOf { it.protein }
+                val c = ingList.sumOf { it.carbs }
+                val f = ingList.sumOf { it.fat }
+                PantryChefResponse(
+                    replyText = "Basandomi sulla tua dispensa e sul tuo piano attivo, ecco il pasto d'oro per il tuo **$targetSlotName**: **Bowl di Riso Basmati, Tagliata di Pollo al Limone e Zucchine**!\n\nHa una digeribilità elevatissima, un profilo aminoacidico completo ed è perfetta sia per il pranzo sia per la cena.\n\nPreparazione:\n1. Cuoci il riso basmati per assorbimento (160ml di acqua per 80g di riso per 10 minuti).\n2. Griglia il petto di pollo tagliato a straccetti con spezie a piacere e gocce di limone.\n3. Salta le zucchine a cubetti e componi il piatto condendo a crudo con l'olio EVO.",
+                    mealProposal = GeneratedMealProposal(
+                        name = "Bowl Basmati, Pollo al Limone e Zucchine",
+                        targetSlotName = targetSlotName,
+                        calories = cal,
+                        protein = p,
+                        carbs = c,
+                        fat = f,
+                        notes = "Piatto iconico da nutrizionista sportivo, perfettamente bilanciato.",
+                        ingredients = ingList
+                    )
+                )
+            }
+        }
+    }
 
     // --- Private Gemini REST helpers ---
 
@@ -838,6 +2082,8 @@ class GeminiNutritionService(private val context: Context) {
             put("contents", contentsArr)
             val genConfig = JSONObject().apply {
                 put("responseMimeType", "application/json")
+                put("maxOutputTokens", 16384)
+                put("temperature", 0.1)
             }
             put("generationConfig", genConfig)
         }
@@ -885,6 +2131,60 @@ class GeminiNutritionService(private val context: Context) {
             put("contents", contentsArr)
             val genConfig = JSONObject().apply {
                 put("responseMimeType", "application/json")
+                put("maxOutputTokens", 16384)
+                put("temperature", 0.1)
+            }
+            put("generationConfig", genConfig)
+        }
+
+        val body = requestJson.toString().toRequestBody("application/json".toMediaType())
+
+        for (model in candidateModels) {
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+            val req = Request.Builder().url(url).post(body).build()
+
+            try {
+                client.newCall(req).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val errBody = response.body?.string() ?: ""
+                        Log.e("GeminiService", "HTTP error ${response.code} with model $model: ${response.message} - $errBody")
+                        return@use
+                    }
+                    val resStr = response.body?.string() ?: return@use
+                    val parsed = extractJsonFromGeminiResponse(resStr)
+                    if (parsed != null) return parsed
+                }
+            } catch (e: Exception) {
+                Log.e("GeminiService", "Exception calling Gemini with model $model: ${e.message}")
+            }
+        }
+        return null
+    }
+
+    private fun callGeminiMultimodalPages(prompt: String, imagesBase64: List<String>): JSONObject? {
+        if (imagesBase64.isEmpty()) return null
+        val requestJson = JSONObject().apply {
+            val contentsArr = JSONArray().apply {
+                val contentObj = JSONObject().apply {
+                    val partsArr = JSONArray().apply {
+                        put(JSONObject().put("text", prompt))
+                        for (base64Data in imagesBase64) {
+                            val inlineData = JSONObject().apply {
+                                put("mimeType", "image/jpeg")
+                                put("data", base64Data)
+                            }
+                            put(JSONObject().put("inlineData", inlineData))
+                        }
+                    }
+                    put("parts", partsArr)
+                }
+                put(contentObj)
+            }
+            put("contents", contentsArr)
+            val genConfig = JSONObject().apply {
+                put("responseMimeType", "application/json")
+                put("maxOutputTokens", 16384)
+                put("temperature", 0.1)
             }
             put("generationConfig", genConfig)
         }
@@ -925,9 +2225,16 @@ class GeminiNutritionService(private val context: Context) {
 
             val cleaned = rawText.trim()
                 .removePrefix("```json")
+                .removePrefix("```JSON")
                 .removePrefix("```")
                 .removeSuffix("```")
                 .trim()
+
+            val startIdx = cleaned.indexOf('{')
+            val endIdx = cleaned.lastIndexOf('}')
+            if (startIdx != -1 && endIdx > startIdx) {
+                return JSONObject(cleaned.substring(startIdx, endIdx + 1))
+            }
 
             return JSONObject(cleaned)
         } catch (e: Exception) {
@@ -961,77 +2268,112 @@ class GeminiNutritionService(private val context: Context) {
 
     // --- Local Fallback Database & Logic ---
 
-    private fun parseGrams(quantity: String): Double {
-        val pattern = Pattern.compile("([0-9]+(?:\\.[0-9]+)?)")
-        val matcher = pattern.matcher(quantity)
-        return if (matcher.find()) {
-            matcher.group(1)?.toDoubleOrNull() ?: 100.0
+    fun parsePortionGrams(foodName: String, quantity: String): Double {
+        val q = quantity.trim().lowercase()
+        val name = foodName.trim().lowercase()
+
+        // 1. Direct kg / chili
+        val kgPattern = Pattern.compile("([0-9]+(?:[.,][0-9]+)?)\\s*(?:kg|chili|chilo)")
+        val kgMatcher = kgPattern.matcher(q)
+        if (kgMatcher.find()) {
+            val num = kgMatcher.group(1)?.replace(',', '.')?.toDoubleOrNull() ?: 1.0
+            return (num * 1000.0).coerceAtLeast(10.0)
+        }
+
+        // 2. Direct l / litri
+        val literPattern = Pattern.compile("([0-9]+(?:[.,][0-9]+)?)\\s*(?:l|litri|litro)")
+        val literMatcher = literPattern.matcher(q)
+        if (literMatcher.find()) {
+            val num = literMatcher.group(1)?.replace(',', '.')?.toDoubleOrNull() ?: 1.0
+            return (num * 1000.0).coerceAtLeast(10.0)
+        }
+
+        // 3. Direct grams / ml
+        val gPattern = Pattern.compile("([0-9]+(?:[.,][0-9]+)?)\\s*(?:g|gr|grammi|ml|cc)\\b")
+        val gMatcher = gPattern.matcher(q)
+        if (gMatcher.find()) {
+            return gMatcher.group(1)?.replace(',', '.')?.toDoubleOrNull() ?: 100.0
+        }
+
+        // 4. Count for items
+        val countPattern = Pattern.compile("([0-9]+(?:[.,][0-9]+)?)")
+        val countMatcher = countPattern.matcher(q)
+        val count = if (countMatcher.find()) {
+            countMatcher.group(1)?.replace(',', '.')?.toDoubleOrNull() ?: 1.0
+        } else if (q.contains("mezz") || q.contains("metà") || q.contains("1/2")) {
+            0.5
         } else {
-            100.0
+            1.0
+        }
+
+        // 5. Intelligent portion heuristics
+        return when {
+            q.contains("cucchiain") -> count * 5.0
+            q.contains("cucchiai") -> {
+                if (name.contains("olio") || name.contains("evo")) count * 10.0 else count * 15.0
+            }
+            q.contains("fett") -> {
+                when {
+                    name.contains("biscottat") -> count * 9.0
+                    name.contains("prosciutto") || name.contains("bresaola") || name.contains("tacchino") -> count * 25.0
+                    else -> count * 35.0 // fetta di pane
+                }
+            }
+            q.contains("uov") || name.contains("uov") -> {
+                if (name.contains("album")) count * 35.0 else count * 55.0 // uovo medio ~55g
+            }
+            q.contains("scatolett") || q.contains("lattin") || q.contains("scatola") -> {
+                if (name.contains("tonno")) count * 52.0 else count * 80.0
+            }
+            q.contains("vasett") -> {
+                if (name.contains("fage") || name.contains("greco")) count * 150.0 else count * 125.0
+            }
+            q.contains("scoop") || q.contains("misurin") -> count * 30.0
+            q.contains("bicchier") -> count * 200.0
+            q.contains("tazz") -> count * 150.0
+            q.contains("piatt") -> {
+                if (name.contains("pasta") || name.contains("riso")) count * 85.0 else count * 200.0
+            }
+            name.contains("mela") || name.contains("mele") -> count * 150.0
+            name.contains("banana") || name.contains("banane") -> count * 120.0
+            name.contains("arancia") || name.contains("arance") -> count * 150.0
+            name.contains("pera") || name.contains("pere") -> count * 160.0
+            name.contains("pesca") || name.contains("pesche") -> count * 130.0
+            name.contains("kiwi") -> count * 80.0
+            count > 10.0 -> count // Raw numeric input like "80" or "150"
+            else -> 100.0 // Default standard 100g portion
         }
     }
 
     private fun fallbackEstimateIngredient(name: String, quantity: String): Ingredient {
-        val grams = parseGrams(quantity)
+        val grams = parsePortionGrams(name, quantity)
         val factor = grams / 100.0
-        val lower = name.lowercase().trim()
 
-        // per 100g values: (kcal, P, C, G)
-        val (kcal100, p100, c100, g100) = when {
-            lower.contains("pasta") || lower.contains("spaghetti") || lower.contains("penne") ->
-                listOf(350, 12, 72, 2)
-            lower.contains("riso") || lower.contains("basmati") ->
-                listOf(350, 8, 77, 1)
-            lower.contains("pane") ->
-                listOf(265, 9, 49, 3)
-            lower.contains("fage") || (lower.contains("yogurt") && lower.contains("greco")) ->
-                listOf(54, 10, 3, 0)
-            lower.contains("yogurt") ->
-                listOf(65, 4, 6, 3)
-            lower.contains("avena") || lower.contains("fiocchi") ->
-                listOf(370, 13, 65, 7)
-            lower.contains("pesca") ->
-                listOf(39, 1, 9, 0)
-            lower.contains("cioccolato") ->
-                listOf(585, 8, 35, 43)
-            lower.contains("pollo") || lower.contains("tacchino") ->
-                listOf(130, 26, 0, 2)
-            lower.contains("salmone") ->
-                listOf(208, 20, 0, 13)
-            lower.contains("tonno") ->
-                listOf(120, 25, 0, 1)
-            lower.contains("uov") -> // uova / uovo (~55g ciascuno, but per 100g)
-                listOf(143, 13, 1, 10)
-            lower.contains("olio") ->
-                listOf(884, 0, 0, 100)
-            lower.contains("mela") ->
-                listOf(52, 0, 14, 0)
-            lower.contains("banana") ->
-                listOf(89, 1, 23, 0)
-            lower.contains("manzo") || lower.contains("carne") ->
-                listOf(210, 22, 0, 13)
-            lower.contains("mozzarella") || lower.contains("formaggio") ->
-                listOf(280, 18, 2, 22)
-            lower.contains("mandorle") || lower.contains("noci") ->
-                listOf(580, 21, 22, 50)
-            lower.contains("patate") ->
-                listOf(77, 2, 17, 0)
-            lower.contains("latte") ->
-                listOf(46, 3, 5, 2)
-            lower.contains("proteine") || lower.contains("whey") ->
-                listOf(380, 80, 6, 4)
-            else ->
-                listOf(180, 8, 25, 5) // default reasonable mixed food
+        val verifiedMatch = VerifiedFoodDatabase.findBestMatch(name)
+        if (verifiedMatch != null) {
+            val cal = (verifiedMatch.caloriesPer100g * factor).roundToInt()
+            val prot = (verifiedMatch.proteinPer100g * factor).roundToInt()
+            val carbs = (verifiedMatch.carbsPer100g * factor).roundToInt()
+            val fat = (verifiedMatch.fatPer100g * factor).roundToInt()
+            return Ingredient(
+                name = name,
+                quantity = if (quantity.isBlank()) "${grams.roundToInt()}g" else quantity,
+                calories = cal,
+                protein = prot,
+                carbs = carbs,
+                fat = fat
+            )
         }
 
-        val cal = (kcal100 * factor).toInt()
-        val prot = (p100 * factor).toInt()
-        val carb = (c100 * factor).toInt()
-        val fat = (g100 * factor).toInt()
+        val (kcal100, p100, c100, g100) = listOf(160, 10, 20, 4)
+        val cal = (kcal100 * factor).roundToInt()
+        val prot = (p100 * factor).roundToInt()
+        val carb = (c100 * factor).roundToInt()
+        val fat = (g100 * factor).roundToInt()
 
         return Ingredient(
             name = name,
-            quantity = quantity,
+            quantity = if (quantity.isBlank()) "${grams.roundToInt()}g" else quantity,
             calories = cal,
             protein = prot,
             carbs = carb,
@@ -1045,6 +2387,65 @@ class GeminiNutritionService(private val context: Context) {
         val isLarge = lower.contains("abbondante") || lower.contains("grande")
 
         val (name, cal, prot, carb, fat, followUp) = when {
+            lower.contains("sushi") || lower.contains("giapponese") -> {
+                val isAyce = lower.contains("all you can eat") || lower.contains("ayce") || lower.contains("buffet")
+                when {
+                    isAyce && isLarge -> Tuple6(
+                        "Sushi All You Can Eat Abbondante",
+                        2250,
+                        85,
+                        290,
+                        62,
+                        if (isOut) "Hai preso molti fritti (tempura) o uramaki speciali con salse/maionese?" else null
+                    )
+                    isAyce -> Tuple6(
+                        "Sushi All You Can Eat",
+                        1680,
+                        68,
+                        215,
+                        46,
+                        if (isOut) "Quanti roll/piatti circa hai consumato?" else null
+                    )
+                    isLarge -> Tuple6(
+                        "Menu Sushi Abbondante",
+                        1280,
+                        55,
+                        160,
+                        32,
+                        "Comprendeva anche tempura o tartare?"
+                    )
+                    else -> Tuple6(
+                        "Sushi Misto (Uramaki, Nigiri, Sashimi)",
+                        880,
+                        42,
+                        110,
+                        20,
+                        "C'erano anche edamame o gyoza?"
+                    )
+                }
+            }
+            lower.contains("carne") || lower.contains("tagliata") || lower.contains("bistecca") || lower.contains("grigliat") -> {
+                val mult = if (isLarge) 1.35 else 1.0
+                Tuple6(
+                    "Tagliata o Grigliata di Carne con contorno",
+                    (780 * mult).toInt(),
+                    (65 * mult).toInt(),
+                    (25 * mult).toInt(),
+                    (38 * mult).toInt(),
+                    if (isOut) "La carne era accompagnata da patate o condita con olio abbondante?" else null
+                )
+            }
+            lower.contains("aperitivo") || lower.contains("apericena") || lower.contains("buffet") -> {
+                val mult = if (isLarge) 1.35 else 1.0
+                Tuple6(
+                    "Apericena / Buffet con drink",
+                    (980 * mult).toInt(),
+                    (30 * mult).toInt(),
+                    (95 * mult).toInt(),
+                    (42 * mult).toInt(),
+                    "Hai consumato fritti, pizzette o patatine?"
+                )
+            }
             lower.contains("pizza") -> {
                 val mult = if (isLarge) 1.2 else 1.0
                 Tuple6(
